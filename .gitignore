@@ -1,12 +1,23 @@
-# Build artifacts
+# CMake build artifacts
 build/
+build-*/
+cmake-build/
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+Testing/
+
+# Generated files
 *.o
 *.so
 *.a
 *.dylib
 
-# Executable
+# Executables
 ssh-proxy-core
+test_runner
 
 # Debug files
 *.dSYM/
@@ -27,9 +38,18 @@ ssh-proxy-core
 ehthumbs.db
 Thumbs.db
 
-# Logs
+# Logs and test results
 *.log
+test_results.xml
 
 # Temporary files
 *.tmp
 *.temp
+
+# Package files
+*.tar.gz
+*.deb
+*.rpm
+
+# Third party (if added later)
+third_party/

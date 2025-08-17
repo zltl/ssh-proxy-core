@@ -3,6 +3,10 @@
 #include "ssh_proxy.h"
 
 int main(int argc, char *argv[]) {
+    // Suppress unused parameter warnings
+    (void)argc;
+    (void)argv;
+    
     printf("SSH Proxy Core - Version 1.0\n");
     printf("Initializing SSH proxy...\n");
     
