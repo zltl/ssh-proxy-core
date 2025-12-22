@@ -1,142 +1,123 @@
 # SSH Proxy Core
 
-A C implementation of an SSH proxy core library with C++ Google Test integration.
+纯 C 语言实现的 SSH 代理核心库。
 
-## Project Structure
+## 项目结构
 
 ```
 ssh-proxy-core/
-├── src/              # Source files (.c)
-├── include/          # Header files (.h)
-├── tests/            # Test files (.cpp with Google Test)
-├── build/            # Build output directory (CMake)
-├── CMakeLists.txt    # CMake build configuration
-└── README.md         # This file
+├── src/              # 源文件 (.c)
+├── include/          # 头文件 (.h)
+├── tests/            # 测试文件 (.c)
+├── lib/              # 第三方库
+├── docs/             # 文档
+├── scripts/          # 构建和工具脚本
+├── build/            # 构建输出目录
+├── Makefile          # 构建配置
+└── README.md         # 本文件
 ```
 
-## Building
+## 构建
 
-### Prerequisites
+### 依赖
 
-- CMake (>= 3.14)
-- GCC/G++ compiler
-- Google Test (libgtest-dev)
-- pkg-config
+- GCC (支持 C11)
+- Make
+- (可选) clang-format - 代码格式化
+- (可选) cppcheck - 静态分析
 
-### Install Dependencies (Ubuntu/Debian)
+### 安装依赖 (Ubuntu/Debian)
 
 ```bash
 sudo apt update
-sudo apt install -y cmake libgtest-dev pkg-config build-essential
+sudo apt install -y build-essential
 ```
 
-### Build Commands
+### 构建命令
 
 ```bash
-# Create build directory
-mkdir build && cd build
+# 调试构建 (默认)
+make
 
-# Configure (Debug build by default)
-cmake ..
+# 发布构建
+make release
 
-# Build the project
-cmake --build .
+# 构建静态库
+make lib
 
-# Or for release build
-cmake -DCMAKE_BUILD_TYPE=Release ..
-cmake --build .
+# 清理
+make clean
 ```
 
-### Alternative: Out-of-source build
-```bash
-# Debug build
-cmake -B build-debug -DCMAKE_BUILD_TYPE=Debug
-cmake --build build-debug
-
-# Release build  
-cmake -B build-release -DCMAKE_BUILD_TYPE=Release
-cmake --build build-release
-```
-
-### Running Tests
+### 运行测试
 
 ```bash
-# From build directory
-ctest
-
-# Or run tests with verbose output
-ctest --verbose
-
-# Or run the test executable directly
-./test_runner
+make test
 ```
 
-## Usage
+## 使用
 
-After building, you can run the program:
+构建后运行程序：
 
 ```bash
-# From build directory
-./ssh-proxy-core
+# 运行
+make run
 
-# Or using CMake custom target
-cmake --build . --target run
+# 或直接运行
+./build/bin/ssh-proxy-core
+
+# 查看帮助
+./build/bin/ssh-proxy-core --help
+
+# 查看版本
+./build/bin/ssh-proxy-core --version
 ```
 
-## Development
+## 开发
 
-### Adding New Features
+### 添加新功能
 
-1. Add header declarations to `include/ssh_proxy.h`
-2. Implement functions in `src/ssh_proxy.c`
-3. Add tests in `tests/test_ssh_proxy.cpp` (using Google Test)
-4. Run tests with `ctest` or `ctest --verbose`
+1. 在 `include/ssh_proxy.h` 添加头文件声明
+2. 在 `src/` 目录实现功能
+3. 在 `tests/` 目录添加测试
+4. 运行 `make test` 验证
 
-### Debugging
-
-Build with debug flags and use GDB:
-```bash
-cmake -B build-debug -DCMAKE_BUILD_TYPE=Debug
-cmake --build build-debug
-gdb ./build-debug/ssh-proxy-core
-```
-
-### Project Management
+### 调试
 
 ```bash
-# Clean build artifacts
-rm -rf build/
+# 调试构建
+make debug
 
-# Install to system (requires sudo)
-cmake --build . --target install
-
-# Create distribution packages
-cmake --build . --target package
+# 使用 GDB
+gdb ./build/bin/ssh-proxy-core
 ```
 
-### CMake Targets
-
-- `ssh-proxy-core` - Main executable
-- `ssh_proxy_lib` - Core library
-- `test_runner` - Test executable
-- `run` - Custom target to build and run the main program
-- `install` - Install to system
-- `package` - Create distribution packages
-
-## Testing
-
-This project uses Google Test for unit testing. Tests are written in C++ but test the C library through proper extern "C" linkage.
-
-### Running Specific Tests
+### 代码质量
 
 ```bash
-# Run with test filtering
-./test_runner --gtest_filter="SshProxyTest.*"
+# 格式化代码
+make format
 
-# Run with different output formats
-./test_runner --gtest_output=xml:test_results.xml
+# 静态分析
+make check
 ```
 
-## License
+### Make 目标
 
-[Add your license here]
+| 目标 | 说明 |
+|------|------|
+| `all` | 构建项目 (默认) |
+| `debug` | 调试构建 |
+| `release` | 发布构建 |
+| `lib` | 构建静态库 |
+| `test` | 运行测试 |
+| `run` | 构建并运行 |
+| `clean` | 清理构建 |
+| `install` | 安装到系统 |
+| `format` | 格式化代码 |
+| `check` | 静态分析 |
+| `help` | 显示帮助 |
+
+## 许可证
+
+[在此添加许可证]
