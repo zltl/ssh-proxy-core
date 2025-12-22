@@ -8,6 +8,12 @@ CFLAGS += -D_POSIX_C_SOURCE=200809L
 LDFLAGS :=
 LIBS :=
 
+# libssh dependency
+LIBSSH_CFLAGS := $(shell pkg-config --cflags libssh 2>/dev/null)
+LIBSSH_LIBS := $(shell pkg-config --libs libssh 2>/dev/null)
+CFLAGS += $(LIBSSH_CFLAGS)
+LIBS += $(LIBSSH_LIBS)
+
 # Directories
 SRC_DIR := src
 INC_DIR := include
@@ -47,10 +53,21 @@ endif
 CFLAGS += -I$(INC_DIR) -I$(TEST_DIR)
 
 # Phony targets
-.PHONY: all clean test run install uninstall dirs debug release help
+.PHONY: all clean test run install uninstall dirs debug release help check-deps
 
 # Default target
-all: dirs $(BIN_DIR)/$(TARGET)
+all: check-deps dirs $(BIN_DIR)/$(TARGET)
+
+# Check dependencies
+check-deps:
+	@pkg-config --exists libssh || { \
+		echo "Error: libssh not found. Please install:"; \
+		echo "  Ubuntu/Debian: sudo apt-get install libssh-dev"; \
+		echo "  RHEL/CentOS:   sudo yum install libssh-devel"; \
+		echo "  macOS:         brew install libssh"; \
+		echo "  Or build from source: https://www.libssh.org/get-it/"; \
+		exit 1; \
+	}
 
 # Debug build
 debug:

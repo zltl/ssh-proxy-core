@@ -7,8 +7,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <signal.h>
+#include <unistd.h>
 #include "ssh_proxy.h"
+#include "ssh_server.h"
 #include "logger.h"
+
+#define DEFAULT_HOST_KEY "/tmp/ssh_proxy_host_key"
 
 static volatile sig_atomic_t g_running = 1;
 
@@ -22,14 +26,29 @@ static void print_usage(const char *prog_name)
 {
     printf("Usage: %s [options]\n", prog_name);
     printf("\nOptions:\n");
-    printf("  -h, --help     Show this help message\n");
-    printf("  -v, --version  Show version information\n");
-    printf("  -d, --debug    Enable debug logging\n");
+    printf("  -h, --help       Show this help message\n");
+    printf("  -v, --version    Show version information\n");
+    printf("  -d, --debug      Enable debug logging\n");
+    printf("  -p, --port PORT  Listen port (default: 2222)\n");
+    printf("  -k, --key FILE   Host key file (default: auto-generate)\n");
+}
+
+static int ensure_host_key(const char *path)
+{
+    if (access(path, R_OK) == 0) {
+        LOG_DEBUG("Using existing host key: %s", path);
+        return 0;
+    }
+
+    LOG_INFO("Generating new host key: %s", path);
+    return ssh_server_generate_key(path, 4096);
 }
 
 int main(int argc, char *argv[])
 {
     log_level_t log_level = LOG_LEVEL_INFO;
+    uint16_t port = 2222;
+    const char *host_key = DEFAULT_HOST_KEY;
 
     /* Handle command line arguments */
     for (int i = 1; i < argc; i++) {
@@ -44,6 +63,12 @@ int main(int argc, char *argv[])
         if (strcmp(argv[i], "-d") == 0 || strcmp(argv[i], "--debug") == 0) {
             log_level = LOG_LEVEL_DEBUG;
         }
+        if ((strcmp(argv[i], "-p") == 0 || strcmp(argv[i], "--port") == 0) && i + 1 < argc) {
+            port = (uint16_t)atoi(argv[++i]);
+        }
+        if ((strcmp(argv[i], "-k") == 0 || strcmp(argv[i], "--key") == 0) && i + 1 < argc) {
+            host_key = argv[++i];
+        }
     }
 
     /* Initialize logging */
@@ -55,49 +80,64 @@ int main(int argc, char *argv[])
 
     LOG_INFO("SSH Proxy Core v%s starting...", ssh_proxy_version());
 
-    /* Create default configuration */
-    ssh_proxy_config_t config = {
-        .listen_addr = "127.0.0.1",
-        .listen_port = 2222,
-        .target_addr = "127.0.0.1",
-        .target_port = 22,
-        .max_connections = 100,
-        .timeout_ms = 30000
+    /* Ensure host key exists */
+    if (ensure_host_key(host_key) != 0) {
+        LOG_FATAL("Failed to prepare host key");
+        log_shutdown();
+        return EXIT_FAILURE;
+    }
+
+    /* Create SSH server configuration */
+    ssh_server_config_t server_config = {
+        .bind_addr = "0.0.0.0",
+        .port = port,
+        .host_key_rsa = host_key,
+        .host_key_ecdsa = NULL,
+        .host_key_ed25519 = NULL,
+        .log_verbosity = (log_level <= LOG_LEVEL_DEBUG) ? 1 : 0
     };
 
-    /* Create proxy instance */
-    ssh_proxy_t *proxy = ssh_proxy_create(&config);
-    if (proxy == NULL) {
-        LOG_FATAL("Failed to create proxy instance");
+    /* Create SSH server */
+    ssh_server_t *server = ssh_server_create(&server_config);
+    if (server == NULL) {
+        LOG_FATAL("Failed to create SSH server");
         log_shutdown();
         return EXIT_FAILURE;
     }
 
-    /* Start proxy */
-    ssh_proxy_error_t err = ssh_proxy_start(proxy);
-    if (err != SSH_PROXY_OK) {
-        LOG_FATAL("Failed to start proxy: %s", ssh_proxy_get_error(proxy));
-        ssh_proxy_destroy(proxy);
+    /* Start SSH server */
+    if (ssh_server_start(server) != 0) {
+        LOG_FATAL("Failed to start SSH server: %s", ssh_server_get_error(server));
+        ssh_server_destroy(server);
         log_shutdown();
         return EXIT_FAILURE;
     }
 
-    LOG_INFO("Proxy listening on %s:%d -> %s:%d",
-             config.listen_addr, config.listen_port,
-             config.target_addr, config.target_port);
-    LOG_DEBUG("Max connections: %zu, timeout: %u ms",
-              config.max_connections, config.timeout_ms);
+    LOG_INFO("SSH server ready, waiting for connections...");
+    LOG_INFO("Press Ctrl+C to stop");
 
-    /* Main loop */
-    while (g_running && ssh_proxy_is_running(proxy)) {
-        /* TODO: Add actual event loop */
-        break;  /* For now, just exit */
+    /* Main loop - accept connections */
+    while (g_running && ssh_server_is_running(server)) {
+        ssh_session session = ssh_server_accept(server);
+        if (session == NULL) {
+            if (g_running) {
+                LOG_DEBUG("Accept returned NULL, continuing...");
+            }
+            continue;
+        }
+
+        LOG_INFO("New connection accepted");
+
+        /* TODO: Handle SSH handshake and forward to target */
+        /* For now, just close the connection */
+        ssh_disconnect(session);
+        ssh_free(session);
     }
 
     /* Cleanup */
     LOG_INFO("Shutting down...");
-    ssh_proxy_stop(proxy);
-    ssh_proxy_destroy(proxy);
+    ssh_server_stop(server);
+    ssh_server_destroy(server);
     log_shutdown();
 
     return EXIT_SUCCESS;

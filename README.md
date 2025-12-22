@@ -23,6 +23,7 @@ ssh-proxy-core/
 
 - GCC (支持 C11)
 - Make
+- libssh (>= 0.9.0) - SSH 协议库
 - (可选) clang-format - 代码格式化
 - (可选) cppcheck - 静态分析
 
@@ -30,7 +31,15 @@ ssh-proxy-core/
 
 ```bash
 sudo apt update
-sudo apt install -y build-essential
+sudo apt install -y build-essential libssh-dev
+```
+
+### 从源码安装 libssh
+
+如果系统包管理器中没有 libssh 或版本过旧，可以从源码安装：
+
+```bash
+./scripts/install-libssh.sh
 ```
 
 ### 构建命令

@@ -10,6 +10,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <libssh/libssh.h>
 
 #ifdef __cplusplus
 extern "C" {
