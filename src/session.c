@@ -332,6 +332,15 @@ void session_set_upstream(session_t *session, ssh_session upstream)
     session->upstream = upstream;
 }
 
+void session_set_username(session_t *session, const char *username)
+{
+    if (session == NULL || username == NULL) {
+        return;
+    }
+    strncpy(session->metadata.username, username, SESSION_MAX_USERNAME - 1);
+    session->metadata.username[SESSION_MAX_USERNAME - 1] = '\0';
+}
+
 session_metadata_t *session_get_metadata(session_t *session)
 {
     if (session == NULL) {

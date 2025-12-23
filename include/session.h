@@ -171,6 +171,13 @@ ssh_session session_get_upstream(session_t *session);
 void session_set_upstream(session_t *session, ssh_session upstream);
 
 /**
+ * @brief Set session username
+ * @param session Session instance
+ * @param username Username string
+ */
+void session_set_username(session_t *session, const char *username);
+
+/**
  * @brief Get session metadata
  * @param session Session instance
  * @return Pointer to session metadata

@@ -17,7 +17,9 @@
 #include "rbac_filter.h"
 #include "audit_filter.h"
 #include "rate_limit_filter.h"
+#include "proxy_handler.h"
 #include "logger.h"
+#include <pthread.h>
 
 #define DEFAULT_HOST_KEY "/tmp/ssh_proxy_host_key"
 
@@ -274,13 +276,27 @@ int main(int argc, char *argv[])
             continue;
         }
 
-        /* TODO: Implement full SSH handshake, auth, and proxy forwarding */
-        /* For now, just close after accepting */
-        LOG_DEBUG("Session %lu: handshake not yet implemented, closing",
-                  session_get_id(session));
+        /* Spawn thread for proxy handler */
+        proxy_handler_context_t *handler_ctx = malloc(sizeof(proxy_handler_context_t));
+        if (handler_ctx == NULL) {
+            LOG_ERROR("Failed to allocate handler context");
+            session_manager_remove_session(session_mgr, session);
+            continue;
+        }
 
-        filter_chain_on_close(filters, &ctx);
-        session_manager_remove_session(session_mgr, session);
+        handler_ctx->session_mgr = session_mgr;
+        handler_ctx->filters = filters;
+        handler_ctx->router = router;
+        handler_ctx->session = session;
+
+        pthread_t thread;
+        if (pthread_create(&thread, NULL, proxy_handler_run, handler_ctx) != 0) {
+            LOG_ERROR("Failed to create proxy thread");
+            free(handler_ctx);
+            session_manager_remove_session(session_mgr, session);
+            continue;
+        }
+        pthread_detach(thread);
     }
 
     /* Cleanup */
