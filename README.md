@@ -1,16 +1,56 @@
 # SSH Proxy Core
 
-纯 C 语言实现的 SSH 代理核心库。
+高性能、可扩展的 SSH 协议代理服务器核心库，纯 C 语言实现。
+
+## 特性
+
+- **代理转发**: 透明代理和显式代理，支持多后端路由
+- **过滤器链**: Envoy 风格的可扩展过滤器架构
+  - Auth Filter: 用户认证 (Password, PublicKey)
+  - RBAC Filter: 基于角色的访问控制
+  - Audit Filter: 会话审计和录像 (asciicast 格式)
+  - Rate Limit Filter: 连接速率和并发限制
+- **会话管理**: 完整的 SSH 会话生命周期管理
+- **路由与负载均衡**: 支持 Round-Robin、Random、最少连接、Hash 策略
+- **健康检查**: 自动检测后端服务器健康状态
+
+## 架构
+
+```
+┌─────────────┐     ┌─────────────────────────────────────┐     ┌──────────────┐
+│   Client    │────▶│           SSH Proxy Core            │────▶│   Upstream   │
+└─────────────┘     │  ┌─────────────────────────────┐    │     └──────────────┘
+                    │  │       Filter Chain          │    │
+                    │  │ ┌────────┬────────┬───────┐ │    │
+                    │  │ │  Auth  │  RBAC  │ Audit │ │    │
+                    │  │ └────────┴────────┴───────┘ │    │
+                    │  └─────────────────────────────┘    │
+                    │  ┌────────────┐  ┌──────────────┐   │
+                    │  │  Session   │  │    Router    │   │
+                    │  │  Manager   │  │ (Load Balancer)│ │
+                    │  └────────────┘  └──────────────┘   │
+                    └─────────────────────────────────────┘
+```
 
 ## 项目结构
 
 ```
 ssh-proxy-core/
 ├── src/              # 源文件 (.c)
+│   ├── main.c            # 主入口
+│   ├── ssh_server.c      # SSH 服务器
+│   ├── session.c         # 会话管理器
+│   ├── filter.c          # 过滤器链
+│   ├── router.c          # 路由器
+│   ├── auth_filter.c     # 认证过滤器
+│   ├── rbac_filter.c     # RBAC 过滤器
+│   ├── audit_filter.c    # 审计过滤器
+│   └── rate_limit_filter.c # 速率限制
 ├── include/          # 头文件 (.h)
 ├── tests/            # 测试文件 (.c)
 ├── lib/              # 第三方库
 ├── docs/             # 文档
+│   └── DESIGN.md     # 设计文档
 ├── scripts/          # 构建和工具脚本
 ├── build/            # 构建输出目录
 ├── Makefile          # 构建配置
@@ -24,6 +64,8 @@ ssh-proxy-core/
 - GCC (支持 C11)
 - Make
 - libssh (>= 0.9.0) - SSH 协议库
+- pthread - 线程支持
+- crypt - 密码哈希
 - (可选) clang-format - 代码格式化
 - (可选) cppcheck - 静态分析
 
@@ -66,30 +108,119 @@ make test
 
 ## 使用
 
-构建后运行程序：
+### 运行代理服务器
 
 ```bash
-# 运行
-make run
-
-# 或直接运行
+# 运行 (默认端口 2222)
 ./build/bin/ssh-proxy-core
+
+# 指定端口
+./build/bin/ssh-proxy-core -p 2223
+
+# 调试模式
+./build/bin/ssh-proxy-core -d
+
+# 指定主机密钥
+./build/bin/ssh-proxy-core -k /path/to/host_key
 
 # 查看帮助
 ./build/bin/ssh-proxy-core --help
+```
 
-# 查看版本
-./build/bin/ssh-proxy-core --version
+### 嵌入式使用
+
+```c
+#include "session.h"
+#include "filter.h"
+#include "router.h"
+
+// 创建会话管理器
+session_manager_config_t sm_cfg = {
+    .max_sessions = 1000,
+    .session_timeout = 3600,
+    .auth_timeout = 60
+};
+session_manager_t *session_mgr = session_manager_create(&sm_cfg);
+
+// 创建过滤器链
+filter_chain_t *filters = filter_chain_create();
+
+// 添加认证过滤器
+auth_filter_config_t auth_cfg = {
+    .backend = AUTH_BACKEND_CALLBACK,
+    .allow_password = true,
+    .password_cb = my_auth_callback,
+    .cb_user_data = my_context
+};
+filter_chain_add(filters, auth_filter_create(&auth_cfg));
+
+// 创建路由器
+router_config_t router_cfg = {
+    .lb_policy = LB_POLICY_ROUND_ROBIN,
+    .connect_timeout_ms = 10000
+};
+router_t *router = router_create(&router_cfg);
+
+// 添加上游服务器
+upstream_config_t upstream = { .port = 22, .enabled = true };
+strcpy(upstream.host, "backend.example.com");
+router_add_upstream(router, &upstream);
+```
+
+## API 参考
+
+### 会话管理器 (session.h)
+
+```c
+session_manager_t *session_manager_create(const session_manager_config_t *config);
+void session_manager_destroy(session_manager_t *manager);
+session_t *session_manager_create_session(session_manager_t *manager, ssh_session client);
+void session_manager_remove_session(session_manager_t *manager, session_t *session);
+size_t session_manager_cleanup(session_manager_t *manager);
+```
+
+### 过滤器链 (filter.h)
+
+```c
+filter_chain_t *filter_chain_create(void);
+void filter_chain_destroy(filter_chain_t *chain);
+int filter_chain_add(filter_chain_t *chain, filter_t *filter);
+filter_status_t filter_chain_on_connect(filter_chain_t *chain, filter_context_t *ctx);
+filter_status_t filter_chain_on_auth(filter_chain_t *chain, filter_context_t *ctx);
+```
+
+### 路由器 (router.h)
+
+```c
+router_t *router_create(const router_config_t *config);
+void router_destroy(router_t *router);
+int router_add_upstream(router_t *router, const upstream_config_t *config);
+int router_resolve(router_t *router, const char *username, const char *target, route_result_t *result);
+ssh_session router_connect(router_t *router, route_result_t *result, uint32_t timeout_ms);
 ```
 
 ## 开发
 
-### 添加新功能
+### 添加自定义过滤器
 
-1. 在 `include/ssh_proxy.h` 添加头文件声明
-2. 在 `src/` 目录实现功能
-3. 在 `tests/` 目录添加测试
-4. 运行 `make test` 验证
+```c
+// 定义回调函数
+static filter_status_t my_on_connect(filter_t *filter, filter_context_t *ctx) {
+    LOG_INFO("Custom filter: new connection");
+    return FILTER_CONTINUE;  // 或 FILTER_REJECT
+}
+
+// 创建过滤器
+filter_callbacks_t callbacks = {
+    .on_connect = my_on_connect,
+    .on_auth = my_on_auth,
+    .on_close = my_on_close
+};
+filter_t *my_filter = filter_create("my_filter", FILTER_TYPE_CUSTOM, &callbacks, config);
+
+// 添加到链
+filter_chain_add(chain, my_filter);
+```
 
 ### 调试
 
@@ -129,4 +260,4 @@ make check
 
 ## 许可证
 
-[在此添加许可证]
+MIT License

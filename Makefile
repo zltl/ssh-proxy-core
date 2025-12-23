@@ -14,6 +14,9 @@ LIBSSH_LIBS := $(shell pkg-config --libs libssh 2>/dev/null)
 CFLAGS += $(LIBSSH_CFLAGS)
 LIBS += $(LIBSSH_LIBS)
 
+# pthread and crypt for session/auth
+LIBS += -lpthread -lcrypt
+
 # Directories
 SRC_DIR := src
 INC_DIR := include

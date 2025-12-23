@@ -10,6 +10,13 @@
 #include <unistd.h>
 #include "ssh_proxy.h"
 #include "ssh_server.h"
+#include "session.h"
+#include "filter.h"
+#include "router.h"
+#include "auth_filter.h"
+#include "rbac_filter.h"
+#include "audit_filter.h"
+#include "rate_limit_filter.h"
 #include "logger.h"
 
 #define DEFAULT_HOST_KEY "/tmp/ssh_proxy_host_key"
@@ -97,10 +104,115 @@ int main(int argc, char *argv[])
         .log_verbosity = (log_level <= LOG_LEVEL_DEBUG) ? 1 : 0
     };
 
+    /* Create session manager */
+    session_manager_config_t session_config = {
+        .max_sessions = 1000,
+        .session_timeout = 3600,
+        .auth_timeout = 60
+    };
+    session_manager_t *session_mgr = session_manager_create(&session_config);
+    if (session_mgr == NULL) {
+        LOG_FATAL("Failed to create session manager");
+        log_shutdown();
+        return EXIT_FAILURE;
+    }
+
+    /* Create filter chain */
+    filter_chain_t *filters = filter_chain_create();
+    if (filters == NULL) {
+        LOG_FATAL("Failed to create filter chain");
+        session_manager_destroy(session_mgr);
+        log_shutdown();
+        return EXIT_FAILURE;
+    }
+
+    /* Add rate limit filter */
+    rate_limit_filter_config_t rate_cfg = {
+        .global_max_connections = 100,
+        .global_max_rate = 10,
+        .global_interval_sec = 1,
+        .log_rejections = true,
+        .rules = NULL
+    };
+    filter_t *rate_filter = rate_limit_filter_create(&rate_cfg);
+    if (rate_filter != NULL) {
+        filter_chain_add(filters, rate_filter);
+    }
+
+    /* Add auth filter with callback (accept all for now) */
+    auth_filter_config_t auth_cfg = {
+        .backend = AUTH_BACKEND_CALLBACK,
+        .allow_password = true,
+        .allow_pubkey = true,
+        .allow_keyboard = false,
+        .max_attempts = 3,
+        .timeout_sec = 60,
+        .local_users = NULL,
+        .password_cb = NULL,  /* Will be set in production */
+        .pubkey_cb = NULL,
+        .cb_user_data = NULL
+    };
+    filter_t *auth_filter = auth_filter_create(&auth_cfg);
+    if (auth_filter != NULL) {
+        filter_chain_add(filters, auth_filter);
+    }
+
+    /* Add audit filter */
+    audit_filter_config_t audit_cfg = {
+        .storage = AUDIT_STORAGE_FILE,
+        .log_dir = "/tmp/ssh_proxy_audit",
+        .log_prefix = "audit_",
+        .record_input = true,
+        .record_output = true,
+        .record_commands = true,
+        .enable_asciicast = true,
+        .max_file_size = 0,
+        .flush_interval = 5,
+        .event_cb = NULL,
+        .cb_user_data = NULL
+    };
+    filter_t *audit_filter = audit_filter_create(&audit_cfg);
+    if (audit_filter != NULL) {
+        filter_chain_add(filters, audit_filter);
+    }
+
+    /* Create router */
+    router_config_t router_cfg = {
+        .lb_policy = LB_POLICY_ROUND_ROBIN,
+        .connect_timeout_ms = 10000,
+        .health_check_interval = 30,
+        .max_retries = 3,
+        .health_check_enabled = false
+    };
+    router_t *router = router_create(&router_cfg);
+    if (router == NULL) {
+        LOG_FATAL("Failed to create router");
+        filter_chain_destroy(filters);
+        session_manager_destroy(session_mgr);
+        log_shutdown();
+        return EXIT_FAILURE;
+    }
+
+    /* Add default upstream (localhost:22 for testing) */
+    upstream_config_t upstream_cfg = {
+        .host = "127.0.0.1",
+        .port = 22,
+        .weight = 1,
+        .enabled = true
+    };
+    strncpy(upstream_cfg.host, "127.0.0.1", ROUTER_MAX_HOST - 1);
+    router_add_upstream(router, &upstream_cfg);
+
+    LOG_INFO("Initialized: session_mgr, %zu filters, router with %zu upstreams",
+             filter_chain_count(filters), router_get_upstream_count(router));
+
     /* Create SSH server */
     ssh_server_t *server = ssh_server_create(&server_config);
     if (server == NULL) {
         LOG_FATAL("Failed to create SSH server");
+        router_destroy(router);
+        filter_chain_destroy(filters);
+        session_manager_destroy(session_mgr);
         log_shutdown();
         return EXIT_FAILURE;
     }
@@ -109,6 +221,9 @@ int main(int argc, char *argv[])
     if (ssh_server_start(server) != 0) {
         LOG_FATAL("Failed to start SSH server: %s", ssh_server_get_error(server));
         ssh_server_destroy(server);
+        router_destroy(router);
+        filter_chain_destroy(filters);
+        session_manager_destroy(session_mgr);
         log_shutdown();
         return EXIT_FAILURE;
     }
@@ -118,26 +233,63 @@ int main(int argc, char *argv[])
 
     /* Main loop - accept connections */
     while (g_running && ssh_server_is_running(server)) {
-        ssh_session session = ssh_server_accept(server);
-        if (session == NULL) {
+        ssh_session client_ssh = ssh_server_accept(server);
+        if (client_ssh == NULL) {
             if (g_running) {
-                LOG_DEBUG("Accept returned NULL, continuing...");
+                /* Periodically cleanup timed-out sessions */
+                session_manager_cleanup(session_mgr);
             }
             continue;
         }
 
         LOG_INFO("New connection accepted");
 
-        /* TODO: Handle SSH handshake and forward to target */
-        /* For now, just close the connection */
-        ssh_disconnect(session);
-        ssh_free(session);
+        /* Create session */
+        session_t *session = session_manager_create_session(session_mgr, client_ssh);
+        if (session == NULL) {
+            LOG_WARN("Failed to create session (limit reached?)");
+            ssh_disconnect(client_ssh);
+            ssh_free(client_ssh);
+            continue;
+        }
+
+        session_set_state(session, SESSION_STATE_HANDSHAKE);
+
+        /* Run filter chain on connect */
+        filter_context_t ctx = {
+            .session = session,
+            .user_data = NULL,
+            .username = NULL,
+            .password = NULL,
+            .pubkey = NULL,
+            .pubkey_len = 0,
+            .target_host = NULL,
+            .target_port = 0
+        };
+
+        filter_status_t status = filter_chain_on_connect(filters, &ctx);
+        if (status == FILTER_REJECT) {
+            LOG_WARN("Connection rejected by filter");
+            session_manager_remove_session(session_mgr, session);
+            continue;
+        }
+
+        /* TODO: Implement full SSH handshake, auth, and proxy forwarding */
+        /* For now, just close after accepting */
+        LOG_DEBUG("Session %lu: handshake not yet implemented, closing",
+                  session_get_id(session));
+
+        filter_chain_on_close(filters, &ctx);
+        session_manager_remove_session(session_mgr, session);
     }
 
     /* Cleanup */
     LOG_INFO("Shutting down...");
     ssh_server_stop(server);
     ssh_server_destroy(server);
+    router_destroy(router);
+    filter_chain_destroy(filters);
+    session_manager_destroy(session_mgr);
     log_shutdown();
 
     return EXIT_SUCCESS;

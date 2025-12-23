@@ -18,9 +18,24 @@
 #include <string.h>
 
 /* Test state - must be defined in each test file */
-static int g_tests_run = 0;
-static int g_tests_passed = 0;
-static int g_tests_failed = 0;
+static int g_tests_run __attribute__((unused)) = 0;
+static int g_tests_passed __attribute__((unused)) = 0;
+static int g_tests_failed __attribute__((unused)) = 0;
+
+/**
+ * @brief Start a test function
+ */
+#define TEST_START() printf("Running %s...\n", __func__)
+
+/**
+ * @brief Pass a test
+ */
+#define TEST_PASS() do { printf("  PASS\n"); return 0; } while(0)
+
+/**
+ * @brief Fail a test with message
+ */
+#define TEST_FAIL(msg) do { printf("  FAIL: %s\n", msg); return 1; } while(0)
 
 /**
  * @brief Assert condition, return from test on failure
@@ -56,6 +71,15 @@ static int g_tests_failed = 0;
  * @brief Assert two strings are equal
  */
 #define TEST_ASSERT_STR_EQ(a, b, msg) TEST_ASSERT(strcmp((a), (b)) == 0, msg)
+
+/* Convenience macros with auto-generated messages */
+#define ASSERT_TRUE(cond) TEST_ASSERT((cond), #cond " is false")
+#define ASSERT_FALSE(cond) TEST_ASSERT(!(cond), #cond " is true")
+#define ASSERT_EQ(a, b) TEST_ASSERT((a) == (b), #a " != " #b)
+#define ASSERT_NE(a, b) TEST_ASSERT((a) != (b), #a " == " #b)
+#define ASSERT_NULL(ptr) TEST_ASSERT((ptr) == NULL, #ptr " is not NULL")
+#define ASSERT_NOT_NULL(ptr) TEST_ASSERT((ptr) != NULL, #ptr " is NULL")
+#define ASSERT_STR_EQ(a, b) TEST_ASSERT(strcmp((a), (b)) == 0, #a " != " #b)
 
 /**
  * @brief Run a test function and track results
