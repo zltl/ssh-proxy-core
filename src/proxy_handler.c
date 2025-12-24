@@ -264,6 +264,11 @@ void *proxy_handler_run(void *arg) {
                 ssh_message_free(message);
                 /* Continue loop to wait for shell/exec */
                 continue; 
+            } else if (subtype == SSH_CHANNEL_REQUEST_EXEC) {
+                ssh_channel_request_exec(upstream_channel, ssh_message_channel_request_command(message));
+                ssh_message_channel_request_reply_success(message);
+                ssh_message_free(message);
+                break;
             }
         }
         ssh_message_reply_default(message);
@@ -290,7 +295,7 @@ cleanup:
     }
     if (upstream_session) {
         ssh_disconnect(upstream_session);
-        ssh_free(upstream_session);
+        /* ssh_free(upstream_session); - Managed by session_manager */
     }
     
     /* Client session is freed by session_manager_remove_session in free_context */
