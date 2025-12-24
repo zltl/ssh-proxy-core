@@ -19,6 +19,8 @@ compile_commands.json
 *.swp
 *.swo
 *~
+\#*\#
+.#*
 
 # OS files
 .DS_Store
