@@ -14,8 +14,9 @@ test_runner
 *.d
 compile_commands.json
 
-# Editor files
+# Editor/IDE files
 .vscode/
+.cache/
 *.swp
 *.swo
 *~
