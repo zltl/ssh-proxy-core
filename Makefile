@@ -56,7 +56,7 @@ endif
 CFLAGS += -I$(INC_DIR) -I$(TEST_DIR)
 
 # Phony targets
-.PHONY: all clean test run install uninstall dirs debug release help check-deps
+.PHONY: all clean test run install uninstall dirs debug release help check-deps compile_commands.json
 
 # Default target
 all: check-deps dirs $(BIN_DIR)/$(TARGET)
@@ -109,7 +109,7 @@ $(BIN_DIR)/test_%: $(TEST_DIR)/test_%.c $(filter-out $(OBJ_DIR)/main.o,$(OBJS))
 
 # Run the program
 run: all
-	@$(BIN_DIR)/$(TARGET)
+	@$(BIN_DIR)/$(TARGET) -d
 
 # Clean build artifacts
 clean:
@@ -136,6 +136,23 @@ format:
 check:
 	@cppcheck --enable=all --std=c11 -I$(INC_DIR) $(SRC_DIR) $(TEST_DIR)
 
+# Generate compile_commands.json for language servers
+compile_commands.json: dirs
+	@echo "Generating compile_commands.json..."
+	@echo '[' > compile_commands.json
+	@first=1; \
+	for src in $(SRCS); do \
+		if [ $$first -eq 0 ]; then echo ',' >> compile_commands.json; fi; \
+		echo '  {' >> compile_commands.json; \
+		echo '    "directory": "'$(shell pwd)'",' >> compile_commands.json; \
+		echo '    "command": "$(CC) $(CFLAGS) -c '$${src}'",' >> compile_commands.json; \
+		echo '    "file": "'$${src}'"' >> compile_commands.json; \
+		echo '  }' >> compile_commands.json; \
+		first=0; \
+	done
+	@echo ']' >> compile_commands.json
+	@echo "Generated compile_commands.json with $(words $(SRCS)) entries"
+
 # Include dependency files
 -include $(DEPS)
 
@@ -156,4 +173,5 @@ help:
 	@echo "  install  - Install to system (PREFIX=/usr/local)"
 	@echo "  format   - Format source code"
 	@echo "  check    - Run static analysis"
+	@echo "  compile_commands.json - Generate compile_commands.json for language servers"
 	@echo "  help     - Show this help message"

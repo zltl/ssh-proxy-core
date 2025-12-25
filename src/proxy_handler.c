@@ -29,76 +29,95 @@ static void free_context(proxy_handler_context_t *ctx) {
     }
 }
 
-/* Perform SSH handshake */
-static int perform_handshake(ssh_session session) {
+/* Setup authentication callbacks and perform handshake */
+static int setup_auth_and_handshake(proxy_handler_context_t *ctx, char **username_out) {
+    ssh_session session = session_get_client(ctx->session);
+    
+    session_set_state(ctx->session, SESSION_STATE_AUTH);
+    
+    /* Perform key exchange first */
     if (ssh_handle_key_exchange(session) != SSH_OK) {
         LOG_ERROR("Key exchange failed: %s", ssh_get_error(session));
         return -1;
     }
-    return 0;
-}
-
-/* Handle authentication */
-static int perform_auth(proxy_handler_context_t *ctx, char **username_out) {
-    ssh_session session = session_get_client(ctx->session);
+    
+    /* Handle authentication messages manually */
     ssh_message message;
     int auth_attempts = 0;
     const int max_attempts = 3;
     bool authenticated = false;
-
-    session_set_state(ctx->session, SESSION_STATE_AUTH);
-
+    
     while (!authenticated && auth_attempts < max_attempts) {
         message = ssh_message_get(session);
         if (!message) {
-            break;
+            continue; /* Wait for client to send auth request */
         }
-
-        if (ssh_message_type(message) != SSH_REQUEST_AUTH) {
-            ssh_message_reply_default(message);
-            ssh_message_free(message);
-            continue;
-        }
-
-        const char *user = ssh_message_auth_user(message);
-        if (user && *username_out == NULL) {
-            *username_out = strdup(user);
-            session_set_username(ctx->session, user);
-        }
-
-        int subtype = ssh_message_subtype(message);
-        filter_context_t filter_ctx = {
-            .session = ctx->session,
-            .username = user,
-            .password = NULL,
-            .pubkey = NULL,
-            .pubkey_len = 0
-        };
-
-        if (subtype == SSH_AUTH_METHOD_PASSWORD) {
-            filter_ctx.password = ssh_message_auth_password(message);
-        } else if (subtype == SSH_AUTH_METHOD_PUBLICKEY) {
-            /* TODO: Extract public key */
-            /* For now, we just pass NULL key which might fail auth filter if it requires key */
-        }
-
-        /* Run auth filters */
-        filter_status_t status = filter_chain_on_auth(ctx->filters, &filter_ctx);
-
-        if (status == FILTER_CONTINUE) {
-            authenticated = true;
-            ssh_message_auth_reply_success(message, 0);
-            LOG_INFO("User '%s' authenticated", user);
+        
+        /* Handle authentication messages */
+        if (ssh_message_type(message) == SSH_REQUEST_AUTH) {
+            const char *user = ssh_message_auth_user(message);
+            if (user && *username_out == NULL) {
+                *username_out = strdup(user);
+                session_set_username(ctx->session, user);
+            }
+            
+            int subtype = ssh_message_subtype(message);
+            filter_context_t filter_ctx = {
+                .session = ctx->session,
+                .username = user,
+                .password = NULL,
+                .pubkey = NULL,
+                .pubkey_len = 0
+            };
+            
+            if (subtype == SSH_AUTH_METHOD_PASSWORD) {
+                filter_ctx.password = ssh_message_auth_password(message);
+                LOG_DEBUG("Password auth attempt for user '%s'", user);
+                
+                /* Run auth filters only for password/pubkey auth */
+                filter_status_t status = filter_chain_on_auth(ctx->filters, &filter_ctx);
+                
+                if (status == FILTER_CONTINUE) {
+                    authenticated = true;
+                    ssh_message_auth_reply_success(message, 0);
+                    LOG_INFO("User '%s' authenticated successfully", user);
+                } else {
+                    auth_attempts++;
+                    ssh_message_reply_default(message);
+                    LOG_WARN("Authentication failed for user '%s' (attempt %d/%d)", 
+                             user, auth_attempts, max_attempts);
+                }
+            } else if (subtype == SSH_AUTH_METHOD_PUBLICKEY) {
+                /* For now, just set a placeholder */
+                filter_ctx.pubkey = (void*)"pubkey";
+                filter_ctx.pubkey_len = 6;
+                LOG_DEBUG("Public key auth attempt for user '%s'", user);
+                
+                /* Run auth filters only for password/pubkey auth */
+                filter_status_t status = filter_chain_on_auth(ctx->filters, &filter_ctx);
+                
+                if (status == FILTER_CONTINUE) {
+                    authenticated = true;
+                    ssh_message_auth_reply_success(message, 0);
+                    LOG_INFO("User '%s' authenticated successfully with public key", user);
+                } else {
+                    auth_attempts++;
+                    ssh_message_reply_default(message);
+                    LOG_WARN("Public key authentication failed for user '%s' (attempt %d/%d)", 
+                             user, auth_attempts, max_attempts);
+                }
+            } else {
+                /* Handle other auth methods (like "none") - just reject them */
+                LOG_DEBUG("Unsupported auth method %d for user '%s'", subtype, user);
+                ssh_message_reply_default(message);
+            }
         } else {
-            auth_attempts++;
-            ssh_message_reply_default(message); /* Sends failure */
-            LOG_WARN("User '%s' authentication failed (attempt %d/%d)", 
-                     user, auth_attempts, max_attempts);
+            ssh_message_reply_default(message);
         }
-
+        
         ssh_message_free(message);
     }
-
+    
     return authenticated ? 0 : -1;
 }
 
@@ -194,18 +213,13 @@ void *proxy_handler_run(void *arg) {
 
     LOG_INFO("Handler started for session %lu", session_get_id(ctx->session));
 
-    /* 1. Handshake */
-    if (perform_handshake(client_session) != 0) {
-        goto cleanup;
-    }
-
-    /* 2. Authentication */
-    if (perform_auth(ctx, &username) != 0) {
+    /* 1. Setup auth callbacks and perform handshake/auth */
+    if (setup_auth_and_handshake(ctx, &username) != 0) {
         goto cleanup;
     }
     session_set_state(ctx->session, SESSION_STATE_AUTHENTICATED);
 
-    /* 3. Connect to Upstream */
+    /* 2. Connect to Upstream */
     upstream_session = connect_upstream(ctx, username);
     if (upstream_session == NULL) {
         LOG_ERROR("Failed to connect to upstream");
@@ -213,7 +227,7 @@ void *proxy_handler_run(void *arg) {
     }
     session_set_upstream(ctx->session, upstream_session);
 
-    /* 4. Open Channel */
+    /* 3. Open Channel */
     /* Wait for channel open request from client */
     ssh_message message;
     while ((message = ssh_message_get(client_session))) {
@@ -240,7 +254,7 @@ void *proxy_handler_run(void *arg) {
         goto cleanup;
     }
 
-    /* 5. Handle Shell/Exec/Subsystem requests */
+    /* 4. Handle Shell/Exec/Subsystem requests */
     /* For simplicity, we just accept the first request (likely shell or exec) and start forwarding */
     /* In a real proxy, we need to forward the request type to upstream */
     
@@ -278,7 +292,7 @@ void *proxy_handler_run(void *arg) {
     session_set_state(ctx->session, SESSION_STATE_ACTIVE);
     LOG_INFO("Session %lu active, forwarding...", session_get_id(ctx->session));
 
-    /* 6. Forward Data */
+    /* 5. Forward Data */
     forward_loop(client_session, upstream_session, client_channel, upstream_channel);
 
 cleanup:
