@@ -11,27 +11,20 @@
 
 /* Filter chain structure */
 struct filter_chain {
-    filter_t *head;         /* First filter in chain */
-    filter_t *tail;         /* Last filter in chain */
-    size_t count;           /* Number of filters */
+    filter_t *head; /* First filter in chain */
+    filter_t *tail; /* Last filter in chain */
+    size_t count;   /* Number of filters */
 };
 
 /* Filter type names */
-static const char *filter_type_names[] = {
-    "AUTH",
-    "RBAC",
-    "AUDIT",
-    "RATE_LIMIT",
-    "CUSTOM"
-};
+static const char *filter_type_names[] = {"AUTH", "RBAC", "AUDIT", "RATE_LIMIT", "CUSTOM"};
 
-filter_chain_t *filter_chain_create(void)
-{
+filter_chain_t *filter_chain_create(void) {
     filter_chain_t *chain = calloc(1, sizeof(filter_chain_t));
     if (chain == NULL) {
         return NULL;
     }
-
+    
     chain->head = NULL;
     chain->tail = NULL;
     chain->count = 0;
@@ -40,8 +33,7 @@ filter_chain_t *filter_chain_create(void)
     return chain;
 }
 
-void filter_chain_destroy(filter_chain_t *chain)
-{
+void filter_chain_destroy(filter_chain_t *chain) {
     if (chain == NULL) {
         return;
     }
@@ -69,8 +61,7 @@ void filter_chain_destroy(filter_chain_t *chain)
     LOG_DEBUG("Filter chain destroyed");
 }
 
-int filter_chain_add(filter_chain_t *chain, filter_t *filter)
-{
+int filter_chain_add(filter_chain_t *chain, filter_t *filter) {
     if (chain == NULL || filter == NULL) {
         return -1;
     }
@@ -87,14 +78,13 @@ int filter_chain_add(filter_chain_t *chain, filter_t *filter)
 
     chain->count++;
 
-    LOG_DEBUG("Filter '%s' (%s) added to chain, count=%zu",
-              filter->name, filter_type_name(filter->type), chain->count);
+    LOG_DEBUG("Filter '%s' (%s) added to chain, count=%zu", filter->name,
+              filter_type_name(filter->type), chain->count);
 
     return 0;
 }
 
-int filter_chain_remove(filter_chain_t *chain, const char *name)
-{
+int filter_chain_remove(filter_chain_t *chain, const char *name) {
     if (chain == NULL || name == NULL) {
         return -1;
     }
@@ -140,8 +130,7 @@ int filter_chain_remove(filter_chain_t *chain, const char *name)
     return -1;
 }
 
-filter_t *filter_chain_get(filter_chain_t *chain, const char *name)
-{
+filter_t *filter_chain_get(filter_chain_t *chain, const char *name) {
     if (chain == NULL || name == NULL) {
         return NULL;
     }
@@ -157,8 +146,7 @@ filter_t *filter_chain_get(filter_chain_t *chain, const char *name)
     return NULL;
 }
 
-size_t filter_chain_count(const filter_chain_t *chain)
-{
+size_t filter_chain_count(const filter_chain_t *chain) {
     if (chain == NULL) {
         return 0;
     }
@@ -167,9 +155,7 @@ size_t filter_chain_count(const filter_chain_t *chain)
 
 /* Filter chain processing functions */
 
-filter_status_t filter_chain_on_connect(filter_chain_t *chain,
-                                        filter_context_t *ctx)
-{
+filter_status_t filter_chain_on_connect(filter_chain_t *chain, filter_context_t *ctx) {
     if (chain == NULL || ctx == NULL) {
         return FILTER_REJECT;
     }
@@ -179,8 +165,7 @@ filter_status_t filter_chain_on_connect(filter_chain_t *chain,
         if (filter->callbacks.on_connect != NULL) {
             filter_status_t status = filter->callbacks.on_connect(filter, ctx);
             if (status != FILTER_CONTINUE) {
-                LOG_DEBUG("Filter '%s' returned %d on connect",
-                          filter->name, status);
+                LOG_DEBUG("Filter '%s' returned %d on connect", filter->name, status);
                 return status;
             }
         }
@@ -190,9 +175,7 @@ filter_status_t filter_chain_on_connect(filter_chain_t *chain,
     return FILTER_CONTINUE;
 }
 
-filter_status_t filter_chain_on_auth(filter_chain_t *chain,
-                                     filter_context_t *ctx)
-{
+filter_status_t filter_chain_on_auth(filter_chain_t *chain, filter_context_t *ctx) {
     if (chain == NULL || ctx == NULL) {
         return FILTER_REJECT;
     }
@@ -212,9 +195,7 @@ filter_status_t filter_chain_on_auth(filter_chain_t *chain,
     return FILTER_CONTINUE;
 }
 
-filter_status_t filter_chain_on_authenticated(filter_chain_t *chain,
-                                              filter_context_t *ctx)
-{
+filter_status_t filter_chain_on_authenticated(filter_chain_t *chain, filter_context_t *ctx) {
     if (chain == NULL || ctx == NULL) {
         return FILTER_REJECT;
     }
@@ -224,8 +205,7 @@ filter_status_t filter_chain_on_authenticated(filter_chain_t *chain,
         if (filter->callbacks.on_authenticated != NULL) {
             filter_status_t status = filter->callbacks.on_authenticated(filter, ctx);
             if (status != FILTER_CONTINUE) {
-                LOG_DEBUG("Filter '%s' returned %d on authenticated",
-                          filter->name, status);
+                LOG_DEBUG("Filter '%s' returned %d on authenticated", filter->name, status);
                 return status;
             }
         }
@@ -235,9 +215,7 @@ filter_status_t filter_chain_on_authenticated(filter_chain_t *chain,
     return FILTER_CONTINUE;
 }
 
-filter_status_t filter_chain_on_route(filter_chain_t *chain,
-                                      filter_context_t *ctx)
-{
+filter_status_t filter_chain_on_route(filter_chain_t *chain, filter_context_t *ctx) {
     if (chain == NULL || ctx == NULL) {
         return FILTER_REJECT;
     }
@@ -257,11 +235,8 @@ filter_status_t filter_chain_on_route(filter_chain_t *chain,
     return FILTER_CONTINUE;
 }
 
-filter_status_t filter_chain_on_data_upstream(filter_chain_t *chain,
-                                              filter_context_t *ctx,
-                                              const uint8_t *data,
-                                              size_t len)
-{
+filter_status_t filter_chain_on_data_upstream(filter_chain_t *chain, filter_context_t *ctx,
+                                              const uint8_t *data, size_t len) {
     if (chain == NULL || ctx == NULL) {
         return FILTER_REJECT;
     }
@@ -269,8 +244,7 @@ filter_status_t filter_chain_on_data_upstream(filter_chain_t *chain,
     filter_t *filter = chain->head;
     while (filter != NULL) {
         if (filter->callbacks.on_data_upstream != NULL) {
-            filter_status_t status = filter->callbacks.on_data_upstream(
-                filter, ctx, data, len);
+            filter_status_t status = filter->callbacks.on_data_upstream(filter, ctx, data, len);
             if (status != FILTER_CONTINUE) {
                 return status;
             }
@@ -281,11 +255,8 @@ filter_status_t filter_chain_on_data_upstream(filter_chain_t *chain,
     return FILTER_CONTINUE;
 }
 
-filter_status_t filter_chain_on_data_downstream(filter_chain_t *chain,
-                                                filter_context_t *ctx,
-                                                const uint8_t *data,
-                                                size_t len)
-{
+filter_status_t filter_chain_on_data_downstream(filter_chain_t *chain, filter_context_t *ctx,
+                                                const uint8_t *data, size_t len) {
     if (chain == NULL || ctx == NULL) {
         return FILTER_REJECT;
     }
@@ -293,8 +264,7 @@ filter_status_t filter_chain_on_data_downstream(filter_chain_t *chain,
     filter_t *filter = chain->head;
     while (filter != NULL) {
         if (filter->callbacks.on_data_downstream != NULL) {
-            filter_status_t status = filter->callbacks.on_data_downstream(
-                filter, ctx, data, len);
+            filter_status_t status = filter->callbacks.on_data_downstream(filter, ctx, data, len);
             if (status != FILTER_CONTINUE) {
                 return status;
             }
@@ -305,8 +275,7 @@ filter_status_t filter_chain_on_data_downstream(filter_chain_t *chain,
     return FILTER_CONTINUE;
 }
 
-void filter_chain_on_close(filter_chain_t *chain, filter_context_t *ctx)
-{
+void filter_chain_on_close(filter_chain_t *chain, filter_context_t *ctx) {
     if (chain == NULL || ctx == NULL) {
         return;
     }
@@ -320,9 +289,8 @@ void filter_chain_on_close(filter_chain_t *chain, filter_context_t *ctx)
     }
 }
 
-filter_t *filter_create(const char *name, filter_type_t type,
-                        const filter_callbacks_t *callbacks, void *config)
-{
+filter_t *filter_create(const char *name, filter_type_t type, const filter_callbacks_t *callbacks,
+                        void *config) {
     if (name == NULL || callbacks == NULL) {
         return NULL;
     }
@@ -342,8 +310,7 @@ filter_t *filter_create(const char *name, filter_type_t type,
     return filter;
 }
 
-const char *filter_type_name(filter_type_t type)
-{
+const char *filter_type_name(filter_type_t type) {
     if (type >= 0 && type <= FILTER_TYPE_CUSTOM) {
         return filter_type_names[type];
     }

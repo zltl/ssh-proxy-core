@@ -4,23 +4,23 @@
  */
 
 #include "rate_limit_filter.h"
-#include "session.h"
-#include "router.h"
 #include "logger.h"
+#include "router.h"
+#include "session.h"
 
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
-#include <pthread.h>
 
 /* Maximum tracked entries */
 #define MAX_ENTRIES 1024
 
 /* Rate limit entry (tracks connections per key) */
 typedef struct rate_entry {
-    char key[256];              /* Key (IP or user) */
-    int current_connections;    /* Current connection count */
-    int connection_count;       /* Connections in current interval */
-    time_t interval_start;      /* Start of current interval */
+    char key[256];           /* Key (IP or user) */
+    int current_connections; /* Current connection count */
+    int connection_count;    /* Connections in current interval */
+    time_t interval_start;   /* Start of current interval */
     bool active;
 } rate_entry_t;
 
@@ -39,20 +39,17 @@ static void rate_limit_on_close(filter_t *filter, filter_context_t *ctx);
 static void rate_limit_destroy(filter_t *filter);
 
 /* Filter callbacks */
-static const filter_callbacks_t rate_limit_callbacks = {
-    .on_connect = rate_limit_on_connect,
-    .on_auth = NULL,
-    .on_authenticated = NULL,
-    .on_route = NULL,
-    .on_data_upstream = NULL,
-    .on_data_downstream = NULL,
-    .on_close = rate_limit_on_close,
-    .destroy = rate_limit_destroy
-};
+static const filter_callbacks_t rate_limit_callbacks = {.on_connect = rate_limit_on_connect,
+                                                        .on_auth = NULL,
+                                                        .on_authenticated = NULL,
+                                                        .on_route = NULL,
+                                                        .on_data_upstream = NULL,
+                                                        .on_data_downstream = NULL,
+                                                        .on_close = rate_limit_on_close,
+                                                        .destroy = rate_limit_destroy};
 
 /* Find or create entry for key */
-static rate_entry_t *find_or_create_entry(rate_limit_state_t *state, const char *key)
-{
+static rate_entry_t *find_or_create_entry(rate_limit_state_t *state, const char *key) {
     if (key == NULL || *key == '\0') {
         return NULL;
     }
@@ -82,9 +79,7 @@ static rate_entry_t *find_or_create_entry(rate_limit_state_t *state, const char 
 }
 
 /* Check rate limit for an entry */
-static rate_limit_result_t check_entry_limit(rate_entry_t *entry,
-                                             const rate_limit_rule_t *rule)
-{
+static rate_limit_result_t check_entry_limit(rate_entry_t *entry, const rate_limit_rule_t *rule) {
     if (entry == NULL || rule == NULL) {
         return RATE_LIMIT_ALLOW;
     }
@@ -98,14 +93,12 @@ static rate_limit_result_t check_entry_limit(rate_entry_t *entry,
     }
 
     /* Check concurrent connections */
-    if (rule->max_connections > 0 &&
-        entry->current_connections >= rule->max_connections) {
+    if (rule->max_connections > 0 && entry->current_connections >= rule->max_connections) {
         return RATE_LIMIT_DENY;
     }
 
     /* Check rate */
-    if (rule->max_rate > 0 &&
-        entry->connection_count >= rule->max_rate) {
+    if (rule->max_rate > 0 && entry->connection_count >= rule->max_rate) {
         return RATE_LIMIT_THROTTLE;
     }
 
@@ -113,8 +106,7 @@ static rate_limit_result_t check_entry_limit(rate_entry_t *entry,
 }
 
 /* Filter callbacks implementation */
-static filter_status_t rate_limit_on_connect(filter_t *filter, filter_context_t *ctx)
-{
+static filter_status_t rate_limit_on_connect(filter_t *filter, filter_context_t *ctx) {
     if (filter == NULL || ctx == NULL) {
         return FILTER_CONTINUE;
     }
@@ -153,8 +145,7 @@ static filter_status_t rate_limit_on_connect(filter_t *filter, filter_context_t 
     return FILTER_CONTINUE;
 }
 
-static void rate_limit_on_close(filter_t *filter, filter_context_t *ctx)
-{
+static void rate_limit_on_close(filter_t *filter, filter_context_t *ctx) {
     if (filter == NULL || ctx == NULL) {
         return;
     }
@@ -169,8 +160,7 @@ static void rate_limit_on_close(filter_t *filter, filter_context_t *ctx)
     rate_limit_release(filter, client_addr, ctx->username);
 }
 
-static void rate_limit_destroy(filter_t *filter)
-{
+static void rate_limit_destroy(filter_t *filter) {
     if (filter == NULL) {
         return;
     }
@@ -194,8 +184,7 @@ static void rate_limit_destroy(filter_t *filter)
     LOG_DEBUG("Rate limit filter destroyed");
 }
 
-filter_t *rate_limit_filter_create(const rate_limit_filter_config_t *config)
-{
+filter_t *rate_limit_filter_create(const rate_limit_filter_config_t *config) {
     if (config == NULL) {
         return NULL;
     }
@@ -230,8 +219,8 @@ filter_t *rate_limit_filter_create(const rate_limit_filter_config_t *config)
         src = src->next;
     }
 
-    filter_t *filter = filter_create("rate_limit", FILTER_TYPE_RATE_LIMIT,
-                                     &rate_limit_callbacks, cfg_copy);
+    filter_t *filter =
+        filter_create("rate_limit", FILTER_TYPE_RATE_LIMIT, &rate_limit_callbacks, cfg_copy);
     if (filter == NULL) {
         rate_limit_rule_t *r = cfg_copy->rules;
         while (r != NULL) {
@@ -262,16 +251,12 @@ filter_t *rate_limit_filter_create(const rate_limit_filter_config_t *config)
     filter->state = state;
 
     LOG_DEBUG("Rate limit filter created, global_max=%d, rate=%d/%ds",
-              config->global_max_connections,
-              config->global_max_rate,
-              config->global_interval_sec);
+              config->global_max_connections, config->global_max_rate, config->global_interval_sec);
 
     return filter;
 }
 
-int rate_limit_add_rule(rate_limit_filter_config_t *config,
-                        const rate_limit_rule_t *rule)
-{
+int rate_limit_add_rule(rate_limit_filter_config_t *config, const rate_limit_rule_t *rule) {
     if (config == NULL || rule == NULL) {
         return -1;
     }
@@ -285,16 +270,13 @@ int rate_limit_add_rule(rate_limit_filter_config_t *config,
     new_rule->next = config->rules;
     config->rules = new_rule;
 
-    LOG_DEBUG("Rate limit rule '%s' added: pattern=%s, max_conn=%d, rate=%d/%ds",
-              rule->name, rule->match_pattern, rule->max_connections,
-              rule->max_rate, rule->interval_sec);
+    LOG_DEBUG("Rate limit rule '%s' added: pattern=%s, max_conn=%d, rate=%d/%ds", rule->name,
+              rule->match_pattern, rule->max_connections, rule->max_rate, rule->interval_sec);
 
     return 0;
 }
 
-int rate_limit_remove_rule(rate_limit_filter_config_t *config,
-                           const char *name)
-{
+int rate_limit_remove_rule(rate_limit_filter_config_t *config, const char *name) {
     if (config == NULL || name == NULL) {
         return -1;
     }
@@ -320,10 +302,8 @@ int rate_limit_remove_rule(rate_limit_filter_config_t *config,
     return -1;
 }
 
-rate_limit_result_t rate_limit_check(filter_t *filter,
-                                     const char *client_addr,
-                                     const char *username)
-{
+rate_limit_result_t rate_limit_check(filter_t *filter, const char *client_addr,
+                                     const char *username) {
     if (filter == NULL) {
         return RATE_LIMIT_ALLOW;
     }
@@ -352,8 +332,7 @@ rate_limit_result_t rate_limit_check(filter_t *filter,
         return RATE_LIMIT_DENY;
     }
 
-    if (config->global_max_rate > 0 &&
-        state->total_in_interval >= config->global_max_rate) {
+    if (config->global_max_rate > 0 && state->total_in_interval >= config->global_max_rate) {
         pthread_mutex_unlock(&state->lock);
         return RATE_LIMIT_THROTTLE;
     }
@@ -400,10 +379,7 @@ rate_limit_result_t rate_limit_check(filter_t *filter,
     return RATE_LIMIT_ALLOW;
 }
 
-void rate_limit_release(filter_t *filter,
-                        const char *client_addr,
-                        const char *username)
-{
+void rate_limit_release(filter_t *filter, const char *client_addr, const char *username) {
     if (filter == NULL) {
         return;
     }
@@ -418,8 +394,7 @@ void rate_limit_release(filter_t *filter,
     const char *key = client_addr ? client_addr : username;
     if (key != NULL) {
         for (int i = 0; i < MAX_ENTRIES; i++) {
-            if (state->entries[i].active &&
-                strcmp(state->entries[i].key, key) == 0) {
+            if (state->entries[i].active && strcmp(state->entries[i].key, key) == 0) {
                 if (state->entries[i].current_connections > 0) {
                     state->entries[i].current_connections--;
                 }
@@ -439,8 +414,7 @@ void rate_limit_release(filter_t *filter,
     pthread_mutex_unlock(&state->lock);
 }
 
-int rate_limit_get_count(filter_t *filter, const char *pattern)
-{
+int rate_limit_get_count(filter_t *filter, const char *pattern) {
     if (filter == NULL || pattern == NULL) {
         return 0;
     }
@@ -454,8 +428,7 @@ int rate_limit_get_count(filter_t *filter, const char *pattern)
 
     int count = 0;
     for (int i = 0; i < MAX_ENTRIES; i++) {
-        if (state->entries[i].active &&
-            router_glob_match(pattern, state->entries[i].key)) {
+        if (state->entries[i].active && router_glob_match(pattern, state->entries[i].key)) {
             count += state->entries[i].current_connections;
         }
     }
