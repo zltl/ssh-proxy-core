@@ -201,6 +201,7 @@ static filter_status_t audit_on_authenticated(filter_t *filter, filter_context_t
         return FILTER_CONTINUE;
     }
 
+    audit_filter_config_t *config = (audit_filter_config_t *)filter->config;
     session_metadata_t *meta = session_get_metadata(ctx->session);
 
     audit_event_t event = {
@@ -215,6 +216,25 @@ static filter_status_t audit_on_authenticated(filter_t *filter, filter_context_t
     };
 
     internal_write_event(filter, &event);
+    
+    /* Start asciicast recording if enabled */
+    if (config != NULL && config->enable_asciicast) {
+        asciicast_header_t header = {
+            .version = 2,
+            .width = 80,
+            .height = 24,
+            .timestamp = time(NULL),
+            .title = ctx->username ? ctx->username : "session",
+            .env_term = "xterm-256color",
+            .env_shell = "/bin/bash"
+        };
+        
+        if (audit_start_recording(filter, session_get_id(ctx->session), &header) == 0) {
+            LOG_INFO("Started session recording for session %lu", 
+                     session_get_id(ctx->session));
+        }
+    }
+    
     return FILTER_CONTINUE;
 }
 

@@ -12,6 +12,7 @@
 #include "session.h"
 #include "filter.h"
 #include "router.h"
+#include "config.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -25,6 +26,7 @@ typedef struct proxy_handler_context {
     filter_chain_t *filters;
     router_t *router;
     session_t *session;
+    proxy_config_t *config;  /* Configuration for route lookup */
 } proxy_handler_context_t;
 
 /**

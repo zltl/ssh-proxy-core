@@ -42,6 +42,7 @@ ssh-proxy-core/
 │   ├── session.c         # 会话管理器
 │   ├── filter.c          # 过滤器链
 │   ├── router.c          # 路由器
+│   ├── config.c          # 配置文件加载
 │   ├── auth_filter.c     # 认证过滤器
 │   ├── rbac_filter.c     # RBAC 过滤器
 │   ├── audit_filter.c    # 审计过滤器
@@ -50,7 +51,8 @@ ssh-proxy-core/
 ├── tests/            # 测试文件 (.c)
 ├── lib/              # 第三方库
 ├── docs/             # 文档
-│   └── DESIGN.md     # 设计文档
+│   ├── DESIGN.md         # 设计文档
+│   └── config.example.ini # 配置文件示例
 ├── scripts/          # 构建和工具脚本
 ├── build/            # 构建输出目录
 ├── Makefile          # 构建配置
@@ -104,6 +106,87 @@ make clean
 
 ```bash
 make test
+```
+
+### 配置文件
+
+SSH Proxy Core 支持通过 INI 格式的配置文件管理用户认证和路由映射。
+
+配置文件示例见 `docs/config.example.ini`。
+
+#### 配置文件格式
+
+```ini
+# 服务器配置
+[server]
+bind_addr = 0.0.0.0
+port = 2222
+host_key = /etc/ssh-proxy/host_key
+
+# 日志配置
+[logging]
+level = info
+audit_dir = /var/log/ssh-proxy/audit
+
+# 连接限制
+[limits]
+max_sessions = 1000
+session_timeout = 3600
+auth_timeout = 60
+
+# 用户配置 (用户名在冒号后)
+[user:admin]
+password_hash = $6$saltsalt$...  # 使用 openssl passwd -6 生成
+pubkey = ssh-rsa AAAA... admin@example.com
+enabled = true
+
+# 用户到上游服务器的路由映射
+# 格式: [route:proxy_user_pattern]  支持 glob 模式 (*, ?)
+[route:admin]
+upstream = prod.example.com
+port = 22
+user = root                      # 上游服务器的用户名
+privkey = /etc/ssh-proxy/keys/admin.key
+
+[route:dev-*]
+upstream = dev.example.com
+user = developer
+privkey = /etc/ssh-proxy/keys/dev.key
+
+# 默认路由 (catch-all)
+[route:*]
+upstream = bastion.example.com
+user = guest
+```
+
+#### 编程方式使用配置
+
+```c
+#include "config.h"
+
+// 从文件加载配置
+proxy_config_t *config = config_load("/etc/ssh-proxy/config.ini");
+
+// 查找用户认证信息
+config_user_t *user = config_find_user(config, "admin");
+if (user != NULL) {
+    // 使用 user->password_hash 或 user->pubkeys 进行认证
+}
+
+// 查找用户路由 (用于确定上游服务器和认证方式)
+config_route_t *route = config_find_route(config, "dev-alice");
+if (route != NULL) {
+    // route->upstream_host  - 上游服务器地址
+    // route->upstream_port  - 上游服务器端口
+    // route->upstream_user  - 上游服务器用户名
+    // route->privkey_path   - 连接上游的私钥路径
+}
+
+// 重载配置
+config_reload(config, "/etc/ssh-proxy/config.ini");
+
+// 清理
+config_destroy(config);
 ```
 
 ## 使用

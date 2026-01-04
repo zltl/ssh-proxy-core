@@ -109,7 +109,7 @@ $(BIN_DIR)/test_%: $(TEST_DIR)/test_%.c $(filter-out $(OBJ_DIR)/main.o,$(OBJS))
 
 # Run the program
 run: all
-	@$(BIN_DIR)/$(TARGET) -d
+	@$(BIN_DIR)/$(TARGET) -d -c config.ini
 
 # Clean build artifacts
 clean:
