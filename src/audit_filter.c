@@ -318,6 +318,15 @@ static void audit_destroy(filter_t *filter)
             }
         }
         free(state);
+        filter->state = NULL;
+    }
+
+    /* Free config - it was allocated in audit_filter_create */
+    if (filter->config != NULL) {
+        audit_filter_config_t *config = (audit_filter_config_t *)filter->config;
+        /* Note: log_dir and log_prefix point to original strings, not strdup'd */
+        free(config);
+        filter->config = NULL;
     }
 
     LOG_DEBUG("Audit filter destroyed");

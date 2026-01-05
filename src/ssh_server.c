@@ -13,6 +13,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <poll.h>
 
 /* Internal server structure */
 struct ssh_server {
@@ -157,17 +158,57 @@ int ssh_server_start(ssh_server_t *server)
 
 void ssh_server_stop(ssh_server_t *server)
 {
-    if (server == NULL || !server->running) {
+    if (server == NULL) {
         return;
     }
 
     server->running = false;
-    LOG_INFO("SSH server stopped");
+    
+    /* Close the listening socket to interrupt any blocking accept() */
+    if (server->sshbind != NULL) {
+        socket_t fd = ssh_bind_get_fd(server->sshbind);
+        if (fd >= 0) {
+            shutdown(fd, SHUT_RDWR);
+        }
+    }
 }
 
 ssh_session ssh_server_accept(ssh_server_t *server)
 {
     if (server == NULL || !server->running) {
+        return NULL;
+    }
+
+    /* Get the listening socket fd */
+    socket_t listen_fd = ssh_bind_get_fd(server->sshbind);
+    if (listen_fd < 0) {
+        set_error(server, "Failed to get bind fd");
+        return NULL;
+    }
+    
+    /* Use poll to wait for connection with timeout */
+    struct pollfd pfd;
+    pfd.fd = listen_fd;
+    pfd.events = POLLIN;
+    pfd.revents = 0;
+    
+    int poll_result = poll(&pfd, 1, 500);  /* 500ms timeout */
+    
+    if (poll_result < 0) {
+        /* Signal interrupted - check running flag */
+        if (errno == EINTR) {
+            return NULL;
+        }
+        set_error(server, "poll failed: %s", strerror(errno));
+        return NULL;
+    }
+    
+    if (poll_result == 0) {
+        /* Timeout - just return to check running flag */
+        return NULL;
+    }
+    
+    if (!server->running) {
         return NULL;
     }
 
@@ -179,9 +220,14 @@ ssh_session ssh_server_accept(ssh_server_t *server)
     }
 
     /* Accept connection */
-    if (ssh_bind_accept(server->sshbind, session) != SSH_OK) {
-        set_error(server, "Failed to accept connection: %s",
-                  ssh_get_error(server->sshbind));
+    int rc = ssh_bind_accept(server->sshbind, session);
+    if (rc != SSH_OK) {
+        /* Check if server is still running - if not, this is expected */
+        if (!server->running) {
+            ssh_free(session);
+            return NULL;
+        }
+        /* Accept failed - could be timeout, interrupt, or real error */
         ssh_free(session);
         return NULL;
     }

@@ -3,6 +3,7 @@
  * @brief SSH Proxy Core - Main Entry Point
  */
 
+#define _DEFAULT_SOURCE  /* For usleep */
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -27,10 +28,15 @@
 
 static volatile sig_atomic_t g_running = 1;
 static proxy_config_t *g_config = NULL;
+static ssh_server_t *g_server = NULL;
 
 static void signal_handler(int sig) {
     (void)sig;
     g_running = 0;
+    /* Also stop the server to interrupt any blocking accept */
+    if (g_server != NULL) {
+        ssh_server_stop(g_server);
+    }
 }
 
 static void print_usage(const char *prog_name) {
@@ -129,9 +135,14 @@ int main(int argc, char *argv[]) {
     /* Initialize logging */
     log_init(log_level, NULL);
 
-    /* Setup signal handlers */
-    signal(SIGINT, signal_handler);
-    signal(SIGTERM, signal_handler);
+    /* Setup signal handlers using sigaction for better control */
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = signal_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;  /* Don't use SA_RESTART - allow interruption */
+    sigaction(SIGINT, &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);
 
     LOG_INFO("SSH Proxy Core v1.0.0 starting...");
 
@@ -281,10 +292,12 @@ int main(int argc, char *argv[]) {
         log_shutdown();
         return EXIT_FAILURE;
     }
+    g_server = server;  /* Set global for signal handler */
 
     /* Start SSH server */
     if (ssh_server_start(server) != 0) {
         LOG_FATAL("Failed to start SSH server: %s", ssh_server_get_error(server));
+        g_server = NULL;
         ssh_server_destroy(server);
         router_destroy(router);
         filter_chain_destroy(filters);
@@ -363,7 +376,25 @@ int main(int argc, char *argv[]) {
 
     /* Cleanup */
     LOG_INFO("Shutting down...");
+    
+    /* First stop accepting new connections */
     ssh_server_stop(server);
+    
+    /* Give active sessions a moment to notice and close gracefully */
+    LOG_DEBUG("Waiting for active sessions to close...");
+    int wait_count = 0;
+    const int max_wait = 30;  /* Maximum 3 seconds (30 * 100ms) */
+    while (session_manager_get_count(session_mgr) > 0 && wait_count < max_wait) {
+        usleep(100000);  /* 100ms */
+        session_manager_cleanup(session_mgr);
+        wait_count++;
+    }
+    
+    if (session_manager_get_count(session_mgr) > 0) {
+        LOG_WARN("Forcing shutdown with %zu active sessions",
+                 session_manager_get_count(session_mgr));
+    }
+    
     ssh_server_destroy(server);
     router_destroy(router);
     filter_chain_destroy(filters);

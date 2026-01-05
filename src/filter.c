@@ -42,16 +42,15 @@ void filter_chain_destroy(filter_chain_t *chain) {
     while (filter != NULL) {
         filter_t *next = filter->next;
 
+        /* Call destroy callback first - it may free config/state */
         if (filter->callbacks.destroy != NULL) {
             filter->callbacks.destroy(filter);
         }
 
-        if (filter->config != NULL) {
-            free(filter->config);
-        }
-        if (filter->state != NULL) {
-            free(filter->state);
-        }
+        /* Only free config/state if not already freed by destroy callback */
+        /* Note: destroy callbacks should set these to NULL after freeing */
+        /* For safety, we no longer free config/state here - destroy callback owns them */
+        
         free(filter);
 
         filter = next;

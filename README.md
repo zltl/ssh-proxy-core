@@ -14,6 +14,297 @@
 - **路由与负载均衡**: 支持 Round-Robin、Random、最少连接、Hash 策略
 - **健康检查**: 自动检测后端服务器健康状态
 
+## 快速上手
+
+### 1. 安装与构建
+
+```bash
+# 安装依赖
+sudo apt update && sudo apt install -y build-essential libssh-dev
+
+# 构建
+make
+
+# 生成主机密钥 (首次运行需要)
+ssh-keygen -t rsa -f /tmp/ssh_proxy_host_key -N ""
+```
+
+### 2. 配置文件
+
+创建配置文件 `/etc/ssh-proxy/config.ini`（或使用项目根目录的 `config.ini`）：
+
+```ini
+[server]
+bind_addr = 0.0.0.0          # 监听地址
+port = 2222                   # 监听端口
+host_key = /etc/ssh-proxy/host_key   # 主机密钥路径
+
+[logging]
+level = info                  # 日志级别: debug, info, warn, error
+audit_dir = /var/log/ssh-proxy/audit # 审计日志和录像目录
+
+[limits]
+max_sessions = 1000           # 最大并发会话数
+session_timeout = 3600        # 会话超时 (秒)
+auth_timeout = 60             # 认证超时 (秒)
+
+# 添加用户 - 密码使用 openssl passwd -6 生成
+[user:admin]
+password_hash = $6$saltsalt$...      # openssl passwd -6 -salt saltsalt 'yourpassword'
+pubkey = ssh-rsa AAAA... user@host   # 可选：公钥认证
+enabled = true
+
+# 路由配置 - 将代理用户映射到上游服务器
+[route:admin]
+upstream = prod.example.com   # 上游服务器地址
+port = 22                     # 上游端口
+user = root                   # 上游用户名
+privkey = /etc/ssh-proxy/keys/admin.key  # 连接上游的私钥
+
+# 通配符路由
+[route:dev-*]                 # 匹配 dev-alice, dev-bob 等
+upstream = dev.example.com
+user = developer
+
+# 默认路由
+[route:*]
+upstream = bastion.example.com
+user = guest
+
+# ============ 功能策略控制 ============
+# 控制用户可以使用的 SSH 功能
+# 格式: [policy:用户名] 或 [policy:用户名@上游服务器]
+
+# 管理员 - 允许所有功能
+[policy:admin]
+allow = all
+
+# 开发者 - 允许 shell、git、下载，禁止上传和端口转发
+[policy:dev-*]
+allow = shell, exec, git, download, sftp_list
+deny = upload, port_forward
+
+# 只读用户 - 只能下载，不能上传
+[policy:readonly-*]
+allow = shell, download, sftp_list
+deny = upload, scp_upload, sftp_upload, rsync_upload, git_push, exec
+
+# Git 用户 - 只能 git 操作
+[policy:git-*]
+allow = git_pull, git_push
+deny = shell, exec, scp, sftp, rsync, port_forward
+
+# 受限用户 - 只能 shell，禁止所有文件传输和端口转发
+[policy:restricted-*]
+allow = shell
+deny = scp, sftp, rsync, port_forward, git, exec
+
+# ============ 针对特定上游服务器的策略 ============
+# 格式: [policy:用户名@上游服务器模式]
+
+# 任何用户访问生产服务器 - 只读
+[policy:*@prod.example.com]
+allow = shell, download, sftp_list
+deny = upload, exec, git_push, sftp_delete
+
+# 管理员访问生产服务器 - 允许所有 (覆盖上面的通用规则)
+[policy:admin@prod.example.com]
+allow = all
+
+# 开发者访问开发服务器 - 允许上传
+[policy:dev-*@dev.example.com]
+allow = shell, exec, scp, sftp, git
+deny = port_forward
+
+# 任何用户访问数据库服务器 - 禁止端口转发
+[policy:*@*db*]
+allow = shell, exec
+deny = scp, sftp, rsync, port_forward, git
+```
+
+### 功能策略说明
+
+策略通过 `[policy:用户名模式]` 或 `[policy:用户名模式@上游服务器模式]` 段配置。
+
+**匹配优先级**（从高到低）：
+1. 精确用户 + 精确上游服务器
+2. 精确用户 + 通配符上游服务器
+3. 精确用户（无上游限制）
+4. 通配符用户 + 精确上游服务器
+5. 通配符用户 + 通配符上游服务器
+6. 通配符用户（无上游限制）
+
+支持以下功能标识：
+
+| 功能标识 | 说明 |
+|----------|------|
+| `shell` | 交互式 Shell |
+| `exec` | 远程命令执行 |
+| `scp` | SCP 上传和下载 |
+| `scp_upload` | SCP 上传 |
+| `scp_download` | SCP 下载 |
+| `sftp` | SFTP 所有操作 |
+| `sftp_upload` | SFTP 上传 |
+| `sftp_download` | SFTP 下载 |
+| `sftp_list` | SFTP 目录列表 |
+| `sftp_delete` | SFTP 删除/重命名 |
+| `rsync` | rsync 上传和下载 |
+| `rsync_upload` | rsync 上传 |
+| `rsync_download` | rsync 下载 |
+| `port_forward` | 所有端口转发 |
+| `local-forward` | 本地端口转发 (-L) |
+| `remote-forward` | 远程端口转发 (-R) |
+| `dynamic-forward` | 动态端口转发 (-D) |
+| `x11` | X11 转发 |
+| `agent` | SSH Agent 转发 |
+| `git` | 所有 Git 操作 |
+| `git_push` | git push |
+| `git_pull` | git pull/fetch/clone |
+| `upload` | 所有上传 (scp/sftp/rsync) |
+| `download` | 所有下载 (scp/sftp/rsync) |
+| `all` | 所有功能 |
+| `none` | 禁止所有 |
+
+### 3. 启动服务
+
+```bash
+# 使用默认配置启动
+./build/bin/ssh-proxy-core
+
+# 指定配置文件
+./build/bin/ssh-proxy-core -c /etc/ssh-proxy/config.ini
+
+# 调试模式 (详细日志输出)
+./build/bin/ssh-proxy-core -d
+
+# 查看所有选项
+./build/bin/ssh-proxy-core --help
+```
+
+### 4. 连接测试
+
+```bash
+# 通过代理连接
+ssh -p 2222 admin@proxy-server
+
+# 指定目标服务器 (透明代理模式)
+ssh -p 2222 admin@target-server -o ProxyJump=proxy-server
+```
+
+## 日志与审计
+
+### 日志位置
+
+| 类型 | 默认路径 | 说明 |
+|------|----------|------|
+| 审计事件日志 | `{audit_dir}/audit_YYYYMMDD.log` | JSON 格式的连接/认证/断开事件 |
+| 会话录像 | `{audit_dir}/session_{id}_{datetime}.cast` | asciicast v2 格式的终端录像 |
+| 文件传输日志 | `{audit_dir}/transfers_YYYYMMDD.log` | 文件传输记录 (SCP/SFTP/rsync) |
+| 端口转发日志 | `{audit_dir}/port_forwards_YYYYMMDD.log` | 端口转发请求记录 |
+| 运行日志 | stdout/stderr | 服务运行时日志 |
+
+默认 `audit_dir` 为 `/tmp/ssh_proxy_audit`，可在配置文件 `[logging]` 段的 `audit_dir` 中修改。
+
+### 审计日志格式
+
+审计事件日志为 JSON 格式，每行一个事件：
+
+```json
+{"timestamp":1704412800,"type":"AUTH_SUCCESS","session_id":12345,"username":"admin","client_addr":"192.168.1.100"}
+{"timestamp":1704412801,"type":"SESSION_START","session_id":12345,"username":"admin","target":"prod.example.com"}
+{"timestamp":1704413400,"type":"SESSION_END","session_id":12345,"username":"admin"}
+```
+
+### 文件传输日志
+
+文件传输日志记录所有通过代理的文件传输操作：
+
+```json
+{"timestamp":1704412900,"session":12345,"user":"admin","event":"start","direction":"upload","protocol":"scp","path":"/home/user/file.txt","size":1024,"transferred":0}
+{"timestamp":1704412901,"session":12345,"user":"admin","event":"complete","direction":"upload","protocol":"scp","path":"/home/user/file.txt","size":1024,"transferred":1024,"checksum":"a1b2c3..."}
+{"timestamp":1704412950,"session":12346,"user":"dev","event":"denied","direction":"upload","protocol":"sftp","path":"/etc/passwd","size":0,"transferred":0}
+```
+
+| 字段 | 说明 |
+|------|------|
+| `event` | `start`/`complete`/`failed`/`denied` |
+| `direction` | `upload`/`download` |
+| `protocol` | `scp`/`sftp`/`rsync`/`git` |
+| `path` | 远程文件路径 |
+| `size` | 文件大小 (字节) |
+| `transferred` | 已传输字节数 |
+| `checksum` | 文件 SHA-256 校验和 (完成时) |
+
+### 端口转发日志
+
+```json
+{"timestamp":1704413000,"session":12345,"user":"admin","type":"local","bind":"localhost:8080","target":"db.internal:3306","allowed":true}
+{"timestamp":1704413010,"session":12346,"user":"guest","type":"remote","bind":"0.0.0.0:9000","target":"localhost:22","allowed":false}
+```
+
+### 查看会话录像 (.cast 文件)
+
+会话录像使用 [asciicast v2](https://github.com/asciinema/asciinema/blob/develop/doc/asciicast-v2.md) 格式，可以用以下方式播放：
+
+#### 方法 1: 使用 asciinema 播放
+
+```bash
+# 安装 asciinema
+sudo apt install asciinema
+# 或
+pip install asciinema
+
+# 播放录像
+asciinema play /tmp/ssh_proxy_audit/session_12345_20250105_120000.cast
+
+# 以 2 倍速播放
+asciinema play -s 2 /tmp/ssh_proxy_audit/session_12345_20250105_120000.cast
+
+# 限制空闲时间 (最多暂停 2 秒)
+asciinema play -i 2 /tmp/ssh_proxy_audit/session_12345_20250105_120000.cast
+```
+
+#### 方法 2: 使用 asciinema-player (Web)
+
+```bash
+# 启动简单 HTTP 服务器
+cd /tmp/ssh_proxy_audit
+python3 -m http.server 8000
+```
+
+然后创建 HTML 页面嵌入播放器：
+
+```html
+<html>
+<head>
+  <link rel="stylesheet" type="text/css" href="https://unpkg.com/asciinema-player@3.0.1/dist/bundle/asciinema-player.css" />
+</head>
+<body>
+  <div id="player"></div>
+  <script src="https://unpkg.com/asciinema-player@3.0.1/dist/bundle/asciinema-player.min.js"></script>
+  <script>
+    AsciinemaPlayer.create('http://localhost:8000/session_12345_20250105_120000.cast', document.getElementById('player'));
+  </script>
+</body>
+</html>
+```
+
+#### 方法 3: 直接查看原始内容
+
+```bash
+# 查看录像头部信息
+head -1 /tmp/ssh_proxy_audit/session_12345_20250105_120000.cast | jq
+
+# 查看所有帧
+cat /tmp/ssh_proxy_audit/session_12345_20250105_120000.cast
+```
+
+`.cast` 文件格式：
+- 第一行：JSON 头部（版本、终端尺寸、时间戳等）
+- 后续行：`[时间偏移, "o"或"i", "数据"]` 格式的事件帧
+  - `"o"` = 输出 (从服务器到客户端)
+  - `"i"` = 输入 (从客户端到服务器)
+
 ## 架构
 
 ```
@@ -343,4 +634,4 @@ make check
 
 ## 许可证
 
-MIT License
+

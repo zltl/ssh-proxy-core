@@ -163,6 +163,8 @@ static void auth_destroy(filter_t *filter)
             free(user);
             user = next;
         }
+        free(config);
+        filter->config = NULL;
     }
 
     LOG_DEBUG("Auth filter destroyed");

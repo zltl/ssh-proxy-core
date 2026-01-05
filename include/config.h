@@ -45,6 +45,15 @@ typedef struct config_route {
     struct config_route *next;
 } config_route_t;
 
+/* Policy entry for user feature control */
+typedef struct config_policy {
+    char username_pattern[CONFIG_MAX_USERNAME]; /* User pattern (supports glob) */
+    char upstream_pattern[CONFIG_MAX_HOST];     /* Upstream pattern (supports glob, empty = any) */
+    uint32_t allowed_features;                  /* Bitwise OR of allowed features */
+    uint32_t denied_features;                   /* Bitwise OR of denied features */
+    struct config_policy *next;
+} config_policy_t;
+
 /* Main configuration structure */
 typedef struct proxy_config {
     /* Server settings */
@@ -58,9 +67,15 @@ typedef struct proxy_config {
     /* User to upstream routes */
     config_route_t *routes;
     
+    /* User policies (feature control) */
+    config_policy_t *policies;
+    uint32_t default_policy;        /* Default allowed features for unmatched users */
+    
     /* Logging */
     int log_level;                      /* 0=DEBUG, 1=INFO, 2=WARN, 3=ERROR */
     char audit_log_dir[256];
+    bool log_transfers;                 /* Log file transfers */
+    bool log_port_forwards;             /* Log port forwarding attempts */
     
     /* Limits */
     size_t max_sessions;
@@ -134,6 +149,32 @@ int config_add_route(proxy_config_t *config,
  */
 config_route_t *config_find_route(const proxy_config_t *config,
                                   const char *proxy_user);
+
+/**
+ * @brief Add a user policy rule
+ * @param config Configuration instance
+ * @param username_pattern Username pattern (supports glob: *, ?)
+ * @param upstream_pattern Upstream host pattern (supports glob, NULL = any upstream)
+ * @param allowed_features Bitwise OR of allowed feature flags
+ * @param denied_features Bitwise OR of denied feature flags (overrides allowed)
+ * @return 0 on success, -1 on error
+ */
+int config_add_policy(proxy_config_t *config,
+                      const char *username_pattern,
+                      const char *upstream_pattern,
+                      uint32_t allowed_features,
+                      uint32_t denied_features);
+
+/**
+ * @brief Find policy for a user and upstream
+ * @param config Configuration instance
+ * @param username Username
+ * @param upstream Upstream host (can be NULL for user-only match)
+ * @return Policy entry or NULL if not found (use default_policy)
+ */
+config_policy_t *config_find_policy(const proxy_config_t *config,
+                                    const char *username,
+                                    const char *upstream);
 
 /**
  * @brief Reload configuration from file

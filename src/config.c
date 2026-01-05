@@ -24,7 +24,8 @@ typedef enum {
     SECTION_LOGGING,
     SECTION_LIMITS,
     SECTION_USER,
-    SECTION_ROUTE
+    SECTION_ROUTE,
+    SECTION_POLICY
 } config_section_t;
 
 /* Helper: trim whitespace */
@@ -71,6 +72,7 @@ static config_section_t parse_section(const char *line)
     if (strcmp(section, "limits") == 0) return SECTION_LIMITS;
     if (strncmp(section, "user:", 5) == 0) return SECTION_USER;
     if (strncmp(section, "route:", 6) == 0) return SECTION_ROUTE;
+    if (strncmp(section, "policy:", 7) == 0) return SECTION_POLICY;
     
     return SECTION_NONE;
 }
@@ -154,6 +156,10 @@ proxy_config_t *config_create(void)
     
     config->users = NULL;
     config->routes = NULL;
+    config->policies = NULL;
+    config->default_policy = 0xFFFFFFFF;  /* All features allowed by default */
+    config->log_transfers = true;
+    config->log_port_forwards = true;
     
     return config;
 }
@@ -177,6 +183,14 @@ void config_destroy(proxy_config_t *config)
         config_route_t *next = route->next;
         free(route);
         route = next;
+    }
+    
+    /* Free policies */
+    config_policy_t *policy = config->policies;
+    while (policy != NULL) {
+        config_policy_t *next = policy->next;
+        free(policy);
+        policy = next;
     }
     
     free(config);
@@ -249,6 +263,87 @@ static bool glob_match(const char *pattern, const char *str)
     return (*pattern == '\0' && *str == '\0');
 }
 
+/* Parse policy feature flags from comma-separated string */
+static uint32_t parse_policy_features(const char *value)
+{
+    if (value == NULL || value[0] == '\0') return 0;
+    
+    uint32_t features = 0;
+    char buf[1024];
+    strncpy(buf, value, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
+    
+    char *saveptr = NULL;
+    char *token = strtok_r(buf, ",|+& \t", &saveptr);
+    while (token != NULL) {
+        /* Trim token */
+        while (*token && isspace((unsigned char)*token)) token++;
+        char *end = token + strlen(token) - 1;
+        while (end > token && isspace((unsigned char)*end)) *end-- = '\0';
+        
+        /* Match feature name */
+        if (strcmp(token, "all") == 0 || strcmp(token, "*") == 0) {
+            features = 0xFFFFFFFF;
+        } else if (strcmp(token, "none") == 0) {
+            features = 0;
+        } else if (strcmp(token, "shell") == 0) {
+            features |= (1 << 0);
+        } else if (strcmp(token, "exec") == 0) {
+            features |= (1 << 1);
+        } else if (strcmp(token, "scp_upload") == 0 || strcmp(token, "scp-upload") == 0) {
+            features |= (1 << 2);
+        } else if (strcmp(token, "scp_download") == 0 || strcmp(token, "scp-download") == 0) {
+            features |= (1 << 3);
+        } else if (strcmp(token, "scp") == 0) {
+            features |= (1 << 2) | (1 << 3);
+        } else if (strcmp(token, "sftp_upload") == 0 || strcmp(token, "sftp-upload") == 0) {
+            features |= (1 << 4);
+        } else if (strcmp(token, "sftp_download") == 0 || strcmp(token, "sftp-download") == 0) {
+            features |= (1 << 5);
+        } else if (strcmp(token, "sftp_list") == 0 || strcmp(token, "sftp-list") == 0) {
+            features |= (1 << 6);
+        } else if (strcmp(token, "sftp_delete") == 0 || strcmp(token, "sftp-delete") == 0) {
+            features |= (1 << 7);
+        } else if (strcmp(token, "sftp") == 0) {
+            features |= (1 << 4) | (1 << 5) | (1 << 6) | (1 << 7);
+        } else if (strcmp(token, "rsync_upload") == 0 || strcmp(token, "rsync-upload") == 0) {
+            features |= (1 << 8);
+        } else if (strcmp(token, "rsync_download") == 0 || strcmp(token, "rsync-download") == 0) {
+            features |= (1 << 9);
+        } else if (strcmp(token, "rsync") == 0) {
+            features |= (1 << 8) | (1 << 9);
+        } else if (strcmp(token, "port_forward_local") == 0 || strcmp(token, "local-forward") == 0) {
+            features |= (1 << 10);
+        } else if (strcmp(token, "port_forward_remote") == 0 || strcmp(token, "remote-forward") == 0) {
+            features |= (1 << 11);
+        } else if (strcmp(token, "port_forward_dynamic") == 0 || strcmp(token, "dynamic-forward") == 0) {
+            features |= (1 << 12);
+        } else if (strcmp(token, "port_forward") == 0 || strcmp(token, "forward") == 0) {
+            features |= (1 << 10) | (1 << 11) | (1 << 12);
+        } else if (strcmp(token, "x11") == 0 || strcmp(token, "x11_forward") == 0) {
+            features |= (1 << 13);
+        } else if (strcmp(token, "agent") == 0 || strcmp(token, "agent_forward") == 0) {
+            features |= (1 << 14);
+        } else if (strcmp(token, "git_push") == 0 || strcmp(token, "git-push") == 0) {
+            features |= (1 << 15);
+        } else if (strcmp(token, "git_pull") == 0 || strcmp(token, "git-pull") == 0) {
+            features |= (1 << 16);
+        } else if (strcmp(token, "git_archive") == 0 || strcmp(token, "git-archive") == 0) {
+            features |= (1 << 17);
+        } else if (strcmp(token, "git") == 0) {
+            features |= (1 << 15) | (1 << 16) | (1 << 17);
+        } else if (strcmp(token, "upload") == 0) {
+            features |= (1 << 2) | (1 << 4) | (1 << 8);  /* scp_upload, sftp_upload, rsync_upload */
+        } else if (strcmp(token, "download") == 0) {
+            features |= (1 << 3) | (1 << 5) | (1 << 9);  /* scp_download, sftp_download, rsync_download */
+        }
+        
+        token = strtok_r(NULL, ",|+& \t", &saveptr);
+    }
+    
+    return features;
+}
+
 int config_add_route(proxy_config_t *config,
                      const char *proxy_user,
                      const char *upstream_host,
@@ -311,6 +406,109 @@ config_route_t *config_find_route(const proxy_config_t *config,
     return wildcard_match;
 }
 
+int config_add_policy(proxy_config_t *config,
+                      const char *username_pattern,
+                      const char *upstream_pattern,
+                      uint32_t allowed_features,
+                      uint32_t denied_features)
+{
+    if (config == NULL || username_pattern == NULL) return -1;
+    
+    config_policy_t *policy = calloc(1, sizeof(config_policy_t));
+    if (policy == NULL) return -1;
+    
+    strncpy(policy->username_pattern, username_pattern, 
+            sizeof(policy->username_pattern) - 1);
+    if (upstream_pattern != NULL) {
+        strncpy(policy->upstream_pattern, upstream_pattern,
+                sizeof(policy->upstream_pattern) - 1);
+    }
+    policy->allowed_features = allowed_features;
+    policy->denied_features = denied_features;
+    
+    /* Add to head of list */
+    policy->next = config->policies;
+    config->policies = policy;
+    
+    return 0;
+}
+
+config_policy_t *config_find_policy(const proxy_config_t *config,
+                                    const char *username,
+                                    const char *upstream)
+{
+    if (config == NULL || username == NULL) return NULL;
+    
+    config_policy_t *user_only_match = NULL;
+    config_policy_t *wildcard_match = NULL;
+    
+    /* Priority order:
+     * 1. Exact user + exact upstream match
+     * 2. Exact user + wildcard upstream match
+     * 3. Exact user + no upstream specified (user-only policy)
+     * 4. Wildcard user + exact upstream match
+     * 5. Wildcard user + wildcard upstream match
+     * 6. Wildcard user + no upstream specified
+     */
+    config_policy_t *policy = config->policies;
+    while (policy != NULL) {
+        bool user_has_wildcard = (strchr(policy->username_pattern, '*') != NULL ||
+                                  strchr(policy->username_pattern, '?') != NULL);
+        bool upstream_has_wildcard = (strchr(policy->upstream_pattern, '*') != NULL ||
+                                      strchr(policy->upstream_pattern, '?') != NULL);
+        bool has_upstream_pattern = (policy->upstream_pattern[0] != '\0');
+        
+        /* Check if user matches */
+        bool user_matches = user_has_wildcard ? 
+                            glob_match(policy->username_pattern, username) :
+                            (strcmp(policy->username_pattern, username) == 0);
+        
+        if (!user_matches) {
+            policy = policy->next;
+            continue;
+        }
+        
+        /* User matches, now check upstream */
+        if (!has_upstream_pattern) {
+            /* Policy applies to any upstream for this user */
+            if (!user_has_wildcard) {
+                /* Exact user match with no upstream - good fallback */
+                if (user_only_match == NULL) {
+                    user_only_match = policy;
+                }
+            } else if (wildcard_match == NULL) {
+                wildcard_match = policy;
+            }
+        } else if (upstream != NULL) {
+            /* Policy has upstream pattern, check if it matches */
+            bool upstream_matches = upstream_has_wildcard ?
+                                    glob_match(policy->upstream_pattern, upstream) :
+                                    (strcmp(policy->upstream_pattern, upstream) == 0);
+            
+            if (upstream_matches) {
+                /* Both user and upstream match */
+                if (!user_has_wildcard && !upstream_has_wildcard) {
+                    return policy;  /* Best match: exact user + exact upstream */
+                }
+                if (!user_has_wildcard) {
+                    /* Exact user + wildcard/exact upstream */
+                    if (user_only_match == NULL || 
+                        policy->upstream_pattern[0] != '\0') {
+                        user_only_match = policy;
+                    }
+                } else if (wildcard_match == NULL) {
+                    wildcard_match = policy;
+                }
+            }
+        }
+        
+        policy = policy->next;
+    }
+    
+    /* Return best match found */
+    return user_only_match ? user_only_match : wildcard_match;
+}
+
 proxy_config_t *config_load(const char *path)
 {
     if (path == NULL) return NULL;
@@ -331,6 +529,7 @@ proxy_config_t *config_load(const char *path)
     config_section_t current_section = SECTION_NONE;
     config_user_t *current_user = NULL;
     config_route_t *current_route = NULL;
+    config_policy_t *current_policy = NULL;
     int line_num = 0;
     
     while (fgets(line, sizeof(line), fp) != NULL) {
@@ -362,6 +561,8 @@ proxy_config_t *config_load(const char *path)
                         config->users = current_user;
                     }
                 }
+                current_route = NULL;
+                current_policy = NULL;
             } else if (current_section == SECTION_ROUTE) {
                 const char *proxy_user = get_section_param(trimmed);
                 if (proxy_user != NULL) {
@@ -375,9 +576,44 @@ proxy_config_t *config_load(const char *path)
                         config->routes = current_route;
                     }
                 }
+                current_user = NULL;
+                current_policy = NULL;
+            } else if (current_section == SECTION_POLICY) {
+                const char *pattern = get_section_param(trimmed);
+                if (pattern != NULL) {
+                    /* Create new policy entry */
+                    /* Format: [policy:user] or [policy:user@upstream] */
+                    current_policy = calloc(1, sizeof(config_policy_t));
+                    if (current_policy != NULL) {
+                        /* Check for user@upstream format */
+                        const char *at = strchr(pattern, '@');
+                        if (at != NULL) {
+                            /* user@upstream format */
+                            size_t user_len = at - pattern;
+                            if (user_len >= sizeof(current_policy->username_pattern)) {
+                                user_len = sizeof(current_policy->username_pattern) - 1;
+                            }
+                            strncpy(current_policy->username_pattern, pattern, user_len);
+                            current_policy->username_pattern[user_len] = '\0';
+                            strncpy(current_policy->upstream_pattern, at + 1,
+                                    sizeof(current_policy->upstream_pattern) - 1);
+                        } else {
+                            /* user only format */
+                            strncpy(current_policy->username_pattern, pattern, 
+                                    sizeof(current_policy->username_pattern) - 1);
+                        }
+                        current_policy->allowed_features = 0x7FFFFFFF;  /* All allowed by default */
+                        current_policy->denied_features = 0;
+                        current_policy->next = config->policies;
+                        config->policies = current_policy;
+                    }
+                }
+                current_user = NULL;
+                current_route = NULL;
             } else {
                 current_user = NULL;
                 current_route = NULL;
+                current_policy = NULL;
             }
             continue;
         }
@@ -510,6 +746,16 @@ proxy_config_t *config_load(const char *path)
             }
             break;
             
+        case SECTION_POLICY:
+            if (current_policy != NULL) {
+                if (strcmp(key, "allow") == 0 || strcmp(key, "allowed") == 0) {
+                    current_policy->allowed_features = parse_policy_features(value);
+                } else if (strcmp(key, "deny") == 0 || strcmp(key, "denied") == 0) {
+                    current_policy->denied_features = parse_policy_features(value);
+                }
+            }
+            break;
+            
         default:
             /* Global section or unknown */
             break;
@@ -527,7 +773,10 @@ proxy_config_t *config_load(const char *path)
     size_t route_count = 0;
     for (config_route_t *r = config->routes; r != NULL; r = r->next) route_count++;
     
-    LOG_DEBUG("Config: %zu users, %zu routes", user_count, route_count);
+    size_t policy_count = 0;
+    for (config_policy_t *p = config->policies; p != NULL; p = p->next) policy_count++;
+    
+    LOG_DEBUG("Config: %zu users, %zu routes, %zu policies", user_count, route_count, policy_count);
     
     return config;
 }
@@ -557,6 +806,14 @@ int config_reload(proxy_config_t *config, const char *path)
         route = next;
     }
     
+    /* Free old policies */
+    config_policy_t *policy = config->policies;
+    while (policy != NULL) {
+        config_policy_t *next = policy->next;
+        free(policy);
+        policy = next;
+    }
+    
     /* Copy new values */
     memcpy(config->bind_addr, new_config->bind_addr, sizeof(config->bind_addr));
     config->port = new_config->port;
@@ -568,10 +825,15 @@ int config_reload(proxy_config_t *config, const char *path)
     config->auth_timeout = new_config->auth_timeout;
     config->users = new_config->users;
     config->routes = new_config->routes;
+    config->policies = new_config->policies;
+    config->default_policy = new_config->default_policy;
+    config->log_transfers = new_config->log_transfers;
+    config->log_port_forwards = new_config->log_port_forwards;
     
     /* Free shell only, not contents (transferred to config) */
     new_config->users = NULL;
     new_config->routes = NULL;
+    new_config->policies = NULL;
     config_destroy(new_config);
     
     LOG_INFO("Configuration reloaded");
