@@ -3,12 +3,13 @@
  * @brief SSH Proxy Core - Connection Handler Implementation
  */
 
-#define _DEFAULT_SOURCE
 #include "proxy_handler.h"
 #include "logger.h"
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <errno.h>
+#include <sys/epoll.h>
 #include <libssh/libssh.h>
 #include <libssh/server.h>
 #include <libssh/callbacks.h>
@@ -17,6 +18,7 @@
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 
 #define BUF_SIZE 16384
+#define MAX_EPOLL_EVENTS 4
 
 /* Helper to clean up context */
 static void free_context(proxy_handler_context_t *ctx) {
@@ -218,7 +220,7 @@ static ssh_session connect_upstream(proxy_handler_context_t *ctx, const char *us
     return NULL;
 }
 
-/* Forwarding loop with audit recording */
+/* Forwarding loop with epoll and audit recording */
 static void forward_loop(proxy_handler_context_t *ctx, 
                          ssh_channel client_chan, 
                          ssh_channel upstream_channel,
@@ -233,11 +235,71 @@ static void forward_loop(proxy_handler_context_t *ctx,
         .user_data = NULL
     };
 
-    /* Simple select loop */
+    /* Get socket file descriptors for epoll */
+    ssh_session client_session = session_get_client(ctx->session);
+    ssh_session upstream_session = session_get_upstream(ctx->session);
+    
+    socket_t client_fd = ssh_get_fd(client_session);
+    socket_t upstream_fd = ssh_get_fd(upstream_session);
+    
+    if (client_fd < 0 || upstream_fd < 0) {
+        LOG_ERROR("Failed to get socket fds: client=%d, upstream=%d", 
+                  client_fd, upstream_fd);
+        return;
+    }
+    
+    /* Create epoll instance */
+    int epoll_fd = epoll_create1(EPOLL_CLOEXEC);
+    if (epoll_fd < 0) {
+        LOG_ERROR("epoll_create1 failed: %s", strerror(errno));
+        return;
+    }
+    
+    /* Add client socket to epoll */
+    struct epoll_event ev;
+    ev.events = EPOLLIN;
+    ev.data.fd = client_fd;
+    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &ev) < 0) {
+        LOG_ERROR("epoll_ctl add client_fd failed: %s", strerror(errno));
+        close(epoll_fd);
+        return;
+    }
+    
+    /* Add upstream socket to epoll */
+    ev.events = EPOLLIN;
+    ev.data.fd = upstream_fd;
+    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, upstream_fd, &ev) < 0) {
+        LOG_ERROR("epoll_ctl add upstream_fd failed: %s", strerror(errno));
+        close(epoll_fd);
+        return;
+    }
+    
+    LOG_DEBUG("Forward loop started: client_fd=%d, upstream_fd=%d", client_fd, upstream_fd);
+
+    /* Event-driven forwarding loop */
+    struct epoll_event events[MAX_EPOLL_EVENTS];
+    
     while (ssh_channel_is_open(client_chan) && ssh_channel_is_open(upstream_channel)) {
-        /* Read from client, write to upstream */
-        nbytes = ssh_channel_read_nonblocking(client_chan, buf, sizeof(buf), 0);
-        if (nbytes > 0) {
+        /* Check for EOF before waiting */
+        if (ssh_channel_is_eof(client_chan) || ssh_channel_is_eof(upstream_channel)) {
+            break;
+        }
+        
+        /* Wait for events with 100ms timeout to allow periodic checks */
+        int nfds = epoll_wait(epoll_fd, events, MAX_EPOLL_EVENTS, 100);
+        
+        if (nfds < 0) {
+            if (errno == EINTR) {
+                continue;  /* Interrupted, retry */
+            }
+            LOG_ERROR("epoll_wait failed: %s", strerror(errno));
+            break;
+        }
+        
+        /* Process events or handle data even on timeout (libssh may have buffered data) */
+        
+        /* Always try to read from client channel (libssh buffers data internally) */
+        while ((nbytes = ssh_channel_read_nonblocking(client_chan, buf, sizeof(buf), 0)) > 0) {
             /* Call filter chain for upstream data (client -> upstream) */
             if (ctx->filters != NULL) {
                 filter_chain_on_data_upstream(ctx->filters, &filter_ctx, 
@@ -245,14 +307,26 @@ static void forward_loop(proxy_handler_context_t *ctx,
             }
             
             rc = ssh_channel_write(upstream_channel, buf, nbytes);
-            if (rc < 0) break;
-        } else if (nbytes < 0) {
-            break; /* Error */
+            if (rc < 0) {
+                LOG_DEBUG("Write to upstream failed");
+                goto end_loop;
+            }
+        }
+        if (nbytes < 0 && nbytes != SSH_AGAIN) {
+            LOG_DEBUG("Read from client failed: %d", nbytes);
+            break;
         }
 
-        /* Read from upstream, write to client */
-        nbytes = ssh_channel_read_nonblocking(upstream_channel, buf, sizeof(buf), 0);
-        if (nbytes > 0) {
+        /* Also check client stderr channel */
+        while ((nbytes = ssh_channel_read_nonblocking(client_chan, buf, sizeof(buf), 1)) > 0) {
+            rc = ssh_channel_write_stderr(upstream_channel, buf, nbytes);
+            if (rc < 0) {
+                goto end_loop;
+            }
+        }
+
+        /* Always try to read from upstream channel */
+        while ((nbytes = ssh_channel_read_nonblocking(upstream_channel, buf, sizeof(buf), 0)) > 0) {
             /* Call filter chain for downstream data (upstream -> client) */
             if (ctx->filters != NULL) {
                 filter_chain_on_data_downstream(ctx->filters, &filter_ctx,
@@ -260,18 +334,28 @@ static void forward_loop(proxy_handler_context_t *ctx,
             }
             
             rc = ssh_channel_write(client_chan, buf, nbytes);
-            if (rc < 0) break;
-        } else if (nbytes < 0) {
-            break; /* Error */
+            if (rc < 0) {
+                LOG_DEBUG("Write to client failed");
+                goto end_loop;
+            }
         }
-
-        /* Check for EOF */
-        if (ssh_channel_is_eof(client_chan) || ssh_channel_is_eof(upstream_channel)) {
+        if (nbytes < 0 && nbytes != SSH_AGAIN) {
+            LOG_DEBUG("Read from upstream failed: %d", nbytes);
             break;
         }
 
-        usleep(1000); /* 1ms sleep to prevent CPU spin */
+        /* Also check upstream stderr channel */
+        while ((nbytes = ssh_channel_read_nonblocking(upstream_channel, buf, sizeof(buf), 1)) > 0) {
+            rc = ssh_channel_write_stderr(client_chan, buf, nbytes);
+            if (rc < 0) {
+                goto end_loop;
+            }
+        }
     }
+
+end_loop:
+    close(epoll_fd);
+    LOG_DEBUG("Forward loop ended");
 }
 
 void *proxy_handler_run(void *arg) {
