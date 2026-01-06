@@ -1,6 +1,8 @@
 /**
  * @file ssh_server.c
  * @brief SSH Server - libssh based SSH server implementation
+ * 
+ * Uses epoll + signalfd for proper event-driven signal handling.
  */
 
 #include "ssh_server.h"
@@ -10,16 +12,23 @@
 #include <string.h>
 #include <errno.h>
 #include <unistd.h>
+#include <pthread.h>
 #include <sys/socket.h>
+#include <sys/epoll.h>
+#include <sys/signalfd.h>
+#include <signal.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include <poll.h>
+
+#define MAX_EPOLL_EVENTS 16
 
 /* Internal server structure */
 struct ssh_server {
     ssh_server_config_t config;
     ssh_bind sshbind;
     int listen_fd;
+    int epoll_fd;       /* epoll instance */
+    int signal_fd;      /* signalfd for SIGINT/SIGTERM */
     bool running;
     char error_msg[256];
 };
@@ -48,6 +57,8 @@ ssh_server_t *ssh_server_create(const ssh_server_config_t *config)
     server->config = *config;
     server->sshbind = NULL;
     server->listen_fd = -1;
+    server->epoll_fd = -1;
+    server->signal_fd = -1;
     server->running = false;
     server->error_msg[0] = '\0';
 
@@ -118,6 +129,16 @@ void ssh_server_destroy(ssh_server_t *server)
         ssh_server_stop(server);
     }
 
+    if (server->signal_fd >= 0) {
+        close(server->signal_fd);
+        server->signal_fd = -1;
+    }
+
+    if (server->epoll_fd >= 0) {
+        close(server->epoll_fd);
+        server->epoll_fd = -1;
+    }
+
     if (server->sshbind != NULL) {
         ssh_bind_free(server->sshbind);
         server->sshbind = NULL;
@@ -148,6 +169,73 @@ int ssh_server_start(ssh_server_t *server)
         return -1;
     }
 
+    /* Get the listening socket fd */
+    server->listen_fd = ssh_bind_get_fd(server->sshbind);
+    if (server->listen_fd < 0) {
+        set_error(server, "Failed to get bind fd");
+        return -1;
+    }
+
+    /* Create epoll instance */
+    server->epoll_fd = epoll_create1(EPOLL_CLOEXEC);
+    if (server->epoll_fd < 0) {
+        set_error(server, "epoll_create1 failed: %s", strerror(errno));
+        LOG_ERROR("epoll_create1 failed: %s", strerror(errno));
+        return -1;
+    }
+
+    /* Add listening socket to epoll */
+    struct epoll_event ev;
+    ev.events = EPOLLIN;
+    ev.data.fd = server->listen_fd;
+    if (epoll_ctl(server->epoll_fd, EPOLL_CTL_ADD, server->listen_fd, &ev) < 0) {
+        set_error(server, "epoll_ctl add listen_fd failed: %s", strerror(errno));
+        LOG_ERROR("epoll_ctl failed: %s", strerror(errno));
+        close(server->epoll_fd);
+        server->epoll_fd = -1;
+        return -1;
+    }
+
+    /* Setup signalfd for SIGINT and SIGTERM */
+    sigset_t mask;
+    sigemptyset(&mask);
+    sigaddset(&mask, SIGINT);
+    sigaddset(&mask, SIGTERM);
+
+    /* Block these signals so they are delivered via signalfd */
+    /* Use pthread_sigmask for thread-safe signal blocking */
+    if (pthread_sigmask(SIG_BLOCK, &mask, NULL) < 0) {
+        set_error(server, "pthread_sigmask failed: %s", strerror(errno));
+        LOG_ERROR("pthread_sigmask failed: %s", strerror(errno));
+        close(server->epoll_fd);
+        server->epoll_fd = -1;
+        return -1;
+    }
+
+    server->signal_fd = signalfd(-1, &mask, SFD_NONBLOCK | SFD_CLOEXEC);
+    if (server->signal_fd < 0) {
+        set_error(server, "signalfd failed: %s", strerror(errno));
+        LOG_ERROR("signalfd failed: %s", strerror(errno));
+        close(server->epoll_fd);
+        server->epoll_fd = -1;
+        return -1;
+    }
+    
+    LOG_DEBUG("signalfd created: fd=%d", server->signal_fd);
+
+    /* Add signalfd to epoll */
+    ev.events = EPOLLIN;
+    ev.data.fd = server->signal_fd;
+    if (epoll_ctl(server->epoll_fd, EPOLL_CTL_ADD, server->signal_fd, &ev) < 0) {
+        set_error(server, "epoll_ctl add signal_fd failed: %s", strerror(errno));
+        LOG_ERROR("epoll_ctl signal_fd failed: %s", strerror(errno));
+        close(server->signal_fd);
+        server->signal_fd = -1;
+        close(server->epoll_fd);
+        server->epoll_fd = -1;
+        return -1;
+    }
+
     server->running = true;
     LOG_INFO("SSH server listening on %s:%d",
              server->config.bind_addr ? server->config.bind_addr : "0.0.0.0",
@@ -164,12 +252,11 @@ void ssh_server_stop(ssh_server_t *server)
 
     server->running = false;
     
-    /* Close the listening socket to interrupt any blocking accept() */
-    if (server->sshbind != NULL) {
-        socket_t fd = ssh_bind_get_fd(server->sshbind);
-        if (fd >= 0) {
-            shutdown(fd, SHUT_RDWR);
-        }
+    /* Close epoll to interrupt any blocking epoll_wait() */
+    if (server->epoll_fd >= 0) {
+        /* Removing fds and closing will wake up epoll_wait */
+        close(server->epoll_fd);
+        server->epoll_fd = -1;
     }
 }
 
@@ -179,61 +266,70 @@ ssh_session ssh_server_accept(ssh_server_t *server)
         return NULL;
     }
 
-    /* Get the listening socket fd */
-    socket_t listen_fd = ssh_bind_get_fd(server->sshbind);
-    if (listen_fd < 0) {
-        set_error(server, "Failed to get bind fd");
+    if (server->epoll_fd < 0) {
         return NULL;
     }
+
+    /* Wait for events using epoll */
+    struct epoll_event events[MAX_EPOLL_EVENTS];
+    int nfds = epoll_wait(server->epoll_fd, events, MAX_EPOLL_EVENTS, -1);
     
-    /* Use poll to wait for connection with timeout */
-    struct pollfd pfd;
-    pfd.fd = listen_fd;
-    pfd.events = POLLIN;
-    pfd.revents = 0;
-    
-    int poll_result = poll(&pfd, 1, 500);  /* 500ms timeout */
-    
-    if (poll_result < 0) {
-        /* Signal interrupted - check running flag */
-        if (errno == EINTR) {
+    if (nfds < 0) {
+        if (errno == EINTR || errno == EBADF) {
+            /* Interrupted or epoll closed - check running flag */
             return NULL;
         }
-        set_error(server, "poll failed: %s", strerror(errno));
+        set_error(server, "epoll_wait failed: %s", strerror(errno));
         return NULL;
     }
     
-    if (poll_result == 0) {
-        /* Timeout - just return to check running flag */
-        return NULL;
-    }
-    
-    if (!server->running) {
-        return NULL;
-    }
-
-    /* Create new session for incoming connection */
-    ssh_session session = ssh_new();
-    if (session == NULL) {
-        set_error(server, "Failed to create SSH session");
-        return NULL;
-    }
-
-    /* Accept connection */
-    int rc = ssh_bind_accept(server->sshbind, session);
-    if (rc != SSH_OK) {
-        /* Check if server is still running - if not, this is expected */
-        if (!server->running) {
-            ssh_free(session);
-            return NULL;
+    /* Process events */
+    for (int i = 0; i < nfds; i++) {
+        int fd = events[i].data.fd;
+        
+        /* Check for signal */
+        if (fd == server->signal_fd) {
+            struct signalfd_siginfo siginfo;
+            ssize_t s = read(server->signal_fd, &siginfo, sizeof(siginfo));
+            if (s == sizeof(siginfo)) {
+                LOG_INFO("Received signal %d (%s)", siginfo.ssi_signo,
+                         siginfo.ssi_signo == SIGINT ? "SIGINT" : "SIGTERM");
+                server->running = false;
+                return NULL;
+            }
+            continue;
         }
-        /* Accept failed - could be timeout, interrupt, or real error */
-        ssh_free(session);
-        return NULL;
-    }
+        
+        /* Check for new connection */
+        if (fd == server->listen_fd && (events[i].events & EPOLLIN)) {
+            if (!server->running) {
+                return NULL;
+            }
 
-    LOG_DEBUG("Accepted new SSH connection");
-    return session;
+            /* Create new session for incoming connection */
+            ssh_session session = ssh_new();
+            if (session == NULL) {
+                set_error(server, "Failed to create SSH session");
+                return NULL;
+            }
+
+            /* Accept connection */
+            int rc = ssh_bind_accept(server->sshbind, session);
+            if (rc != SSH_OK) {
+                if (!server->running) {
+                    ssh_free(session);
+                    return NULL;
+                }
+                ssh_free(session);
+                return NULL;
+            }
+
+            LOG_DEBUG("Accepted new SSH connection");
+            return session;
+        }
+    }
+    
+    return NULL;
 }
 
 bool ssh_server_is_running(const ssh_server_t *server)
