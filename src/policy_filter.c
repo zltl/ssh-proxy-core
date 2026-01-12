@@ -8,6 +8,7 @@
 #include "policy_filter.h"
 #include "logger.h"
 #include "router.h"
+#include "json.gen.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -111,28 +112,35 @@ static void write_transfer_log(const policy_filter_config_t *config,
         return;
     }
     
-    /* Write JSON line */
-    fprintf(fp, "{\"timestamp\":%ld,\"session\":%lu,\"user\":\"%s\","
-            "\"event\":\"%s\",\"direction\":\"%s\",\"protocol\":\"%s\","
-            "\"path\":\"%s\",\"size\":%lu,\"transferred\":%lu",
-            (long)record->timestamp,
-            record->session_id,
-            record->username,
-            record->event == TRANSFER_EVENT_START ? "start" :
-            record->event == TRANSFER_EVENT_COMPLETE ? "complete" :
-            record->event == TRANSFER_EVENT_FAILED ? "failed" :
-            record->event == TRANSFER_EVENT_DENIED ? "denied" : "progress",
-            policy_transfer_dir_name(record->direction),
-            policy_transfer_proto_name(record->protocol),
-            record->remote_path,
-            record->file_size,
-            record->bytes_transferred);
+    /* Use json-gen-c for JSON serialization */
+    struct transfer_log log_entry;
+    transfer_log_init(&log_entry);
+    
+    log_entry.timestamp = (long)record->timestamp;
+    log_entry.session_id = (long)record->session_id;
+    sstr_append_cstr(log_entry.username, record->username);
+    
+    const char *event_str = record->event == TRANSFER_EVENT_START ? "start" :
+                            record->event == TRANSFER_EVENT_COMPLETE ? "complete" :
+                            record->event == TRANSFER_EVENT_FAILED ? "failed" :
+                            record->event == TRANSFER_EVENT_DENIED ? "denied" : "progress";
+    sstr_append_cstr(log_entry.event, event_str);
+    sstr_append_cstr(log_entry.direction, policy_transfer_dir_name(record->direction));
+    sstr_append_cstr(log_entry.protocol, policy_transfer_proto_name(record->protocol));
+    sstr_append_cstr(log_entry.path, record->remote_path);
+    log_entry.file_size = (long)record->file_size;
+    log_entry.bytes_transferred = (long)record->bytes_transferred;
     
     if (record->checksum[0] != '\0') {
-        fprintf(fp, ",\"checksum\":\"%s\"", record->checksum);
+        sstr_append_cstr(log_entry.checksum, record->checksum);
     }
-    fprintf(fp, "}\n");
     
+    sstr_t json_str = sstr_new();
+    json_marshal_transfer_log(&log_entry, json_str);
+    fprintf(fp, "%s\n", sstr_cstr(json_str));
+    
+    sstr_free(json_str);
+    transfer_log_clear(&log_entry);
     fclose(fp);
 }
 
@@ -160,17 +168,26 @@ static void write_port_forward_log(const policy_filter_config_t *config,
         return;
     }
     
-    fprintf(fp, "{\"timestamp\":%ld,\"session\":%lu,\"user\":\"%s\","
-            "\"type\":\"%s\",\"bind\":\"%s:%u\",\"target\":\"%s:%u\","
-            "\"allowed\":%s}\n",
-            (long)record->timestamp,
-            record->session_id,
-            record->username,
-            record->is_local ? "local" : "remote",
-            record->bind_host, record->bind_port,
-            record->target_host, record->target_port,
-            record->allowed ? "true" : "false");
+    /* Use json-gen-c for JSON serialization */
+    struct port_forward_log log_entry;
+    port_forward_log_init(&log_entry);
     
+    log_entry.timestamp = (long)record->timestamp;
+    log_entry.session_id = (long)record->session_id;
+    sstr_append_cstr(log_entry.username, record->username);
+    sstr_append_cstr(log_entry.type, record->is_local ? "local" : "remote");
+    sstr_append_cstr(log_entry.bind_host, record->bind_host);
+    log_entry.bind_port = (int)record->bind_port;
+    sstr_append_cstr(log_entry.target_host, record->target_host);
+    log_entry.target_port = (int)record->target_port;
+    log_entry.allowed = record->allowed;
+    
+    sstr_t json_str = sstr_new();
+    json_marshal_port_forward_log(&log_entry, json_str);
+    fprintf(fp, "%s\n", sstr_cstr(json_str));
+    
+    sstr_free(json_str);
+    port_forward_log_clear(&log_entry);
     fclose(fp);
 }
 

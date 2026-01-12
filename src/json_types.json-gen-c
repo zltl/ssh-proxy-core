@@ -1,0 +1,28 @@
+/* JSON types for ssh-proxy-core logging */
+
+/* File transfer record */
+struct transfer_log {
+    long timestamp;
+    long session_id;
+    sstr_t username;
+    sstr_t event;
+    sstr_t direction;
+    sstr_t protocol;
+    sstr_t path;
+    long file_size;
+    long bytes_transferred;
+    sstr_t checksum;
+};
+
+/* Port forward record */
+struct port_forward_log {
+    long timestamp;
+    long session_id;
+    sstr_t username;
+    sstr_t type;
+    sstr_t bind_host;
+    int bind_port;
+    sstr_t target_host;
+    int target_port;
+    bool allowed;
+};

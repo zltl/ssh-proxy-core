@@ -25,14 +25,30 @@ OBJ_DIR := $(BUILD_DIR)/obj
 BIN_DIR := $(BUILD_DIR)/bin
 LIB_DIR := lib
 TEST_DIR := tests
+GEN_DIR := $(BUILD_DIR)/gen
+DEPS_DIR := $(BUILD_DIR)/deps
+
+# json-gen-c (downloaded at build time)
+JSON_GEN_C_VERSION := main
+JSON_GEN_C_URL := https://github.com/zltl/json-gen-c/archive/refs/heads/$(JSON_GEN_C_VERSION).tar.gz
+JSON_GEN_C_DIR := $(DEPS_DIR)/json-gen-c-$(JSON_GEN_C_VERSION)
+JSON_GEN_C_BIN := $(JSON_GEN_C_DIR)/build/bin/json-gen-c
+JSON_GEN_C_STAMP := $(DEPS_DIR)/.json-gen-c-built
+JSON_TYPES_DEF := $(SRC_DIR)/json_types.json-gen-c
+JSON_GEN_H := $(GEN_DIR)/json.gen.h
+JSON_GEN_C := $(GEN_DIR)/json.gen.c
+JSON_SSTR_H := $(GEN_DIR)/sstr.h
+JSON_SSTR_C := $(GEN_DIR)/sstr.c
 
 # Target
 TARGET := ssh-proxy-core
 LIB_TARGET := libsshproxy.a
 
-# Source files
+# Source files (include generated sources)
 SRCS := $(wildcard $(SRC_DIR)/*.c)
 OBJS := $(patsubst $(SRC_DIR)/%.c,$(OBJ_DIR)/%.o,$(SRCS))
+# Add generated JSON sources
+OBJS += $(OBJ_DIR)/json.gen.o $(OBJ_DIR)/sstr.o $(OBJ_DIR)/error_codes.o
 DEPS := $(OBJS:.o=.d)
 
 # Test files
@@ -53,13 +69,44 @@ else
 endif
 
 # Include paths
-CFLAGS += -I$(INC_DIR) -I$(TEST_DIR)
+CFLAGS += -I$(INC_DIR) -I$(TEST_DIR) -I$(GEN_DIR)
 
 # Phony targets
-.PHONY: all clean test run install uninstall dirs debug release help check-deps compile_commands.json
+.PHONY: all clean test run install uninstall dirs debug release help check-deps compile_commands.json json-gen-c deps-clean
 
 # Default target
-all: check-deps dirs $(BIN_DIR)/$(TARGET)
+all: check-deps dirs json-gen $(BIN_DIR)/$(TARGET)
+
+# Download and build json-gen-c tool
+$(JSON_GEN_C_STAMP):
+	@echo "Downloading json-gen-c..."
+	@mkdir -p $(DEPS_DIR)
+	@curl -sL $(JSON_GEN_C_URL) | tar -xz -C $(DEPS_DIR)
+	@echo "Building json-gen-c..."
+	@$(MAKE) -C $(JSON_GEN_C_DIR) -j$(shell nproc) >/dev/null 2>&1 || $(MAKE) -C $(JSON_GEN_C_DIR)
+	@touch $(JSON_GEN_C_STAMP)
+
+$(JSON_GEN_C_BIN): $(JSON_GEN_C_STAMP)
+
+# Generate JSON serialization code
+json-gen: $(JSON_GEN_H)
+
+$(JSON_GEN_H) $(JSON_GEN_C) $(JSON_SSTR_H) $(JSON_SSTR_C): $(JSON_TYPES_DEF) $(JSON_GEN_C_BIN)
+	@echo "Generating JSON serialization code..."
+	@mkdir -p $(GEN_DIR) $(GEN_DIR)/utils
+	@$(JSON_GEN_C_BIN) -in $(JSON_TYPES_DEF) -out $(GEN_DIR)
+	@cp $(JSON_GEN_C_DIR)/src/utils/error_codes.h $(GEN_DIR)/utils/
+	@cp $(JSON_GEN_C_DIR)/src/utils/error_codes.c $(GEN_DIR)/utils/
+
+# Compile generated JSON sources
+$(OBJ_DIR)/json.gen.o: $(JSON_GEN_C) $(JSON_GEN_H)
+	$(CC) $(CFLAGS) -Wno-unused-parameter -Wno-pedantic -MMD -MP -c -o $@ $<
+
+$(OBJ_DIR)/sstr.o: $(JSON_SSTR_C) $(JSON_SSTR_H)
+	$(CC) $(CFLAGS) -Wno-unused-parameter -Wno-pedantic -MMD -MP -c -o $@ $<
+
+$(OBJ_DIR)/error_codes.o: $(GEN_DIR)/utils/error_codes.c
+	$(CC) $(CFLAGS) -Wno-unused-parameter -MMD -MP -c -o $@ $<
 
 # Check dependencies
 check-deps:
@@ -82,7 +129,7 @@ release:
 
 # Create directories
 dirs:
-	@mkdir -p $(OBJ_DIR) $(BIN_DIR)
+	@mkdir -p $(OBJ_DIR) $(BIN_DIR) $(GEN_DIR)
 
 # Link executable
 $(BIN_DIR)/$(TARGET): $(OBJS)
@@ -97,7 +144,7 @@ lib: dirs $(filter-out $(OBJ_DIR)/main.o,$(OBJS))
 	ar rcs $(BIN_DIR)/$(LIB_TARGET) $(filter-out $(OBJ_DIR)/main.o,$(OBJS))
 
 # Build and run tests
-test: dirs $(TEST_BINS)
+test: dirs json-gen $(TEST_BINS)
 	@echo "Running tests..."
 	@for test in $(TEST_BINS); do \
 		echo ""; \
@@ -105,7 +152,7 @@ test: dirs $(TEST_BINS)
 	done
 
 $(BIN_DIR)/test_%: $(TEST_DIR)/test_%.c $(filter-out $(OBJ_DIR)/main.o,$(OBJS))
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $< $(filter-out $(OBJ_DIR)/main.o,$(OBJS)) $(LIBS)
+	$(CC) $(CFLAGS) -Wno-unused-parameter $(LDFLAGS) -o $@ $< $(filter-out $(OBJ_DIR)/main.o,$(OBJS)) $(LIBS)
 
 # Run the program
 run: all
@@ -114,6 +161,10 @@ run: all
 # Clean build artifacts
 clean:
 	rm -rf $(BUILD_DIR)
+
+# Clean downloaded dependencies
+deps-clean:
+	rm -rf $(DEPS_DIR)
 
 # Install (requires root)
 PREFIX ?= /usr/local
